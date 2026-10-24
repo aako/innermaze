@@ -37,6 +37,19 @@ innermaze --file "$HOME/Downloads/sample.m4a" --apply
 
 The helper can import existing Dropbox archive recordings and can install an opt-in 10-minute pending-transcription worker on Mango. The separate helper does **not** overwrite BRAT plugin files. All source audio and canonical archives are read-only.
 
+## Existing Voice Memos transcripts — automatic reuse (Mango helper 0.1.1)
+
+Importing a file with `--file`, or processing a pending note created by the Obsidian mobile importer, now looks up **the source audio SHA-256** in both existing `identity.tsv` indices under `~/Work/Temp/VoiceMemoSaver/Whisper/`. If matching word-timed `.json` exists, Innermaze creates the normal editable Markdown and external `.sync.json` directly; **it does not run MLX Whisper again**. This also works for renamed archived recordings. Repeated imports preserve existing notes and corrections.
+
+```fish
+python3 ~/Code/Innermaze/tools/innermaze.py --file "/Users/ak/Dropbox/1 NOTES/Voice Memos Full DB/2026-09-03 07-52-07 - Dream - film photo shoot.m4a"
+python3 ~/Code/Innermaze/tools/innermaze.py --file "/Users/ak/Dropbox/1 NOTES/Voice Memos Full DB/2026-09-03 07-52-07 - Dream - film photo shoot.m4a" --apply
+```
+
+Both commands work without modifying the original Dropbox recording. The first is a **dry run**, including cached-transcript availability; the second creates the iCloud playback copy/note as needed. If the original index is not on Mango, supply `--whisper-root PATH`. If the Apple UUID manifest is now held on Cashew, provide a **readable, verified copy** with `--manifest-db PATH`; otherwise Innermaze does not invent an Apple UUID. An unambiguous Apple UUID is used for new archive notes, and added as `archive_recording_id` metadata for mobile notes without changing existing Markdown links.
+
+If two different indexed transcripts claim the same audio hash, Innermaze stops before writing rather than choose potentially wrong timestamps. Audio with no matching transcript uses local MLX Whisper (unless `--no-transcribe` is supplied). **BRAT updates only the Obsidian player**; this change is in the separate Mango helper and does not change the plugin `0.1.0` release.
+
 ## Local tests
 
 ```fish

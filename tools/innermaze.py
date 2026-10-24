@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # filename: innermaze.py
-# version: 0.1.0
-# timestamp: 2026-10-24 11:22:47
+# version: 0.1.1
+# timestamp: 2026-10-24 16:54:00
 """Innermaze Mango-local audio importer and transcription worker; Obsidian plugin installed via BRAT.
 
 Dry-run default for imports/install. Archives and source audio are read-only.
@@ -68,6 +68,143 @@ def records_for(source: str, whisper_root: Path) -> list[dict[str, str]]:
         if stem and row.get("source_path"):
             index.setdefault(stem, row)  # earliest identity owns the stem
     return [index[stem] for stem in sorted(index)]
+
+
+def cached_transcript(digest: str, source: Path | None, whisper_root: Path) -> dict[str, Any] | None:
+    """Reuse the legacy Whisper JSON by SOURCE audio hash, never by mutable filename.
+
+    Duplicate indices are harmless only when their transcript content agrees.
+    When distinct transcripts disagree, an exact indexed source path may break
+    the tie; otherwise fail closed instead of selecting arbitrary text/times.
+    """
+    candidates: list[tuple[str, dict[str, str], Path]] = []
+    normalized = digest.lower()
+    for kind in SOURCES:
+        index = whisper_root / kind / "identity.tsv"
+        if not index.is_file():
+            continue
+        for row in records_for(kind, whisper_root):
+            if (row.get("sha256") or "").lower() != normalized:
+                continue
+            json_path = whisper_root / kind / (row["output_stem"] + ".json")
+            if json_path.is_file():
+                candidates.append((kind, row, json_path))
+    if not candidates:
+        return None
+    if source is not None:
+        exact = [entry for entry in candidates if
+                 Path(entry[1]["source_path"]).expanduser().absolute() == source.expanduser().absolute()]
+        if exact:
+            candidates = exact
+        else:
+            # Matching the canonical Dropbox source disambiguates cross-app
+            # duplicate audio, but never multiple distinct candidates in one app.
+            kinds = [kind for kind, root in SOURCES.items() if source.expanduser().absolute().is_relative_to(root.expanduser().absolute())]
+            within = [entry for entry in candidates if entry[0] in kinds]
+            if within:
+                candidates = within
+    parsed = []
+    for kind, row, json_path in candidates:
+        try:
+            data = json.loads(json_path.read_text("utf-8"))
+        except (ValueError, OSError) as error:
+            raise ValueError(f"Cached Whisper JSON unreadable: {json_path}: {error}") from error
+        if not isinstance(data, dict) or not isinstance(data.get("segments"), list):
+            raise ValueError(f"Invalid cached Whisper transcript: {json_path}")
+        parsed.append((kind, row, json_path, data))
+    # All distinct candidates must contain identical transcription/timing.
+    # JSON keys/order may differ; compare semantic contents, not serialized bytes.
+    representations = {json.dumps(item[3].get("segments"), sort_keys=True, ensure_ascii=False)
+                       for item in parsed}
+    if len(representations) != 1:
+        raise ValueError("More than one different cached transcript has this audio SHA-256; "
+                         "refusing to guess timing. Select a specific archive source.")
+    kind, row, path, data = parsed[0]
+    print(f"  Reusing {kind} Whisper transcript: {row['output_stem']} (no new MLX job)")
+    return {"source": kind, "stem": row["output_stem"], "json_path": str(path), "data": data}
+
+
+def archived_uuid(digest: str, source: Path | None, manifest: Path) -> str | None:
+    """Resolve Apple UUID only when the manifest establishes a unique owner.
+
+    An unavailable Cashew manifest is not an excuse to invent an Apple UUID.
+    """
+    if not manifest.is_file():
+        return None
+    uri = "file:" + quote(str(manifest.resolve()), safe="/") + "?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as db:
+            matches = db.execute("""
+                SELECT o.dest_rel, r.logical_id FROM objects o
+                JOIN object_recordings r ON o.archive=r.archive AND o.dest_rel=r.dest_rel
+                WHERE o.archive='voice_memos' AND LOWER(o.sha256)=?
+            """, (digest.lower(),)).fetchall()
+    except sqlite3.Error as error:
+        raise ValueError(f"Cannot read Apple UUID manifest: {manifest}: {error}") from error
+    if not matches:
+        return None
+    if source is not None:
+        root = SOURCES["voice-memos"].expanduser().absolute()
+        source_abs = source.expanduser().absolute()
+        if source_abs.is_relative_to(root):
+            rel = source_abs.relative_to(root).as_posix()
+            exact = [match for match in matches if match[0] == rel]
+            if exact:
+                matches = exact
+    owners = {item[1] for item in matches}
+    if len(owners) != 1:
+        # Shared identical bytes can belong to multiple distinct Voice Memos.
+        # Caller retains a content-based identity instead of claiming a UUID.
+        print("  Apple UUID unresolved: identical audio has multiple archive owners")
+        return None
+    logical_id = owners.pop()
+    if not re.fullmatch(r"voice-memos:uuid:[A-Za-z0-9-]+", logical_id):
+        raise ValueError(f"Unexpected Apple recording identity in manifest: {logical_id}")
+    return "vm-" + logical_id.removeprefix("voice-memos:uuid:")
+
+
+def matching_note(vault: Path, digest: str, preferred_id: str | None = None) -> Path | None:
+    """Reuse old generic/mobile notes and UUID notes without destroying edits.
+
+    Never fold two proven, distinct Apple identities into one note.
+    """
+    directory = vault / "Voice Archive/Notes"
+    if not directory.is_dir():
+        return None
+    if preferred_id:
+        exact = directory / f"{preferred_id}.md"
+        if exact.is_file():
+            fields, _ = parse_note(exact.read_text("utf-8"))
+            if fields.get("source_sha256") == digest:
+                return exact
+            raise ValueError(f"Recording ID already used for different audio: {exact}")
+    generic = directory / f"audio-{digest}.md"
+    if generic.is_file():
+        fields, _ = parse_note(generic.read_text("utf-8"))
+        if fields.get("source_sha256") != digest:
+            raise ValueError(f"Hash-named note has conflicting identity: {generic}")
+        return generic
+    if preferred_id is None:
+        candidates = []
+        for note in sorted(directory.glob("*.md")):
+            fields, _ = parse_note(note.read_text("utf-8"))
+            if fields.get("source_sha256") == digest:
+                candidates.append(note)
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise ValueError("Audio matches multiple existing archive notes; UUID required")
+    return None
+
+
+def sync_from_transcript(transcript: dict[str, Any], identity: str, digest: str,
+                         playback_digest: str) -> dict[str, Any]:
+    data = transcript["data"]
+    return {"format": "voice-archive-sync-v1", "recording_id": identity,
+            "source": transcript["source"], "source_sha256": digest,
+            "source_whisper_stem": transcript["stem"],
+            "playback_sha256": playback_digest,
+            "blocks": make_blocks(data, identity), "words": valid_words(data)}
 
 
 def valid_words(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -308,7 +445,8 @@ def find_managed_audio(vault: Path, digest: str) -> Path | None:
 
 
 def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
-               model_python: Path, model: str) -> Path | None:
+               model_python: Path, model: str, whisper_root: Path = WHISPER,
+               manifest_db: Path = BACKUP_DB) -> Path | None:
     step(1, 6, "Validate the arbitrary audio source and destination vault")
     source = source.expanduser().absolute()
     if not source.is_file():
@@ -328,9 +466,21 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
         raise ValueError(f"Selected directory is not an existing Obsidian vault: {vault}")
     step(2, 6, "SHA-256 content identity: one playback asset per source")
     digest = digest_file(source)
-    identity = f"audio-{digest}"
+    # Preserve Apple identity when uniquely attested by a readable manifest.
+    apple_id = archived_uuid(digest, source, manifest_db)
+    prior_note = matching_note(vault, digest, apple_id)
+    identity = (prior_note.stem if prior_note else apple_id or f"audio-{digest}")
     inside = source_in_vault(source, vault)
     existing = find_managed_audio(vault, digest)
+    if existing is None and prior_note is not None:
+        saved_fields, _ = parse_note(prior_note.read_text("utf-8"))
+        old_rel = saved_fields.get("voice_audio", "")
+        old_asset = (vault / old_rel).resolve() if old_rel else None
+        if old_asset and old_asset.is_file() and old_asset.is_relative_to(vault.resolve()):
+            if digest_file(old_asset) == saved_fields.get("playback_sha256", digest):
+                existing = old_asset
+    # Validate the legacy index before any vault writes (ambiguity fails closed).
+    transcript_available = cached_transcript(digest, source, whisper_root) is not None
     convert = existing is None and source.suffix.lower() not in IOS_PLAYABLE
     if convert:
         inside = None  # Native iOS playback requires an M4A derivative.
@@ -377,11 +527,11 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
     raw_note = make_arbitrary_note(identity, source.name, audio_rel, sync_rel, digest, playback_digest)
     atomic_create(note, raw_note.encode("utf-8"), TEMP_DIR)
     step(6, 6, "Imported and queued: nothing changed in source or archive")
-    if auto_transcribe:
-        if model_python.is_file():
-            process_one(note, vault, model_python, model)
-        else:
-            print(f"  Transcription pending: MLX is unavailable at {model_python}. Run --process-pending on Mango.")
+    # Existing Whisper timing is reusable even with --no-transcribe and even
+    # when MLX isn't installed. New Whisper jobs alone obey --no-transcribe.
+    if auto_transcribe or transcript_available:
+        process_one(note, vault, model_python, model, whisper_root, manifest_db,
+                    allow_new_transcription=auto_transcribe)
     return note
 
 
@@ -441,7 +591,9 @@ def atomic_replace_bytes(path: Path, contents: bytes) -> None:
         staged.unlink(missing_ok=True)
 
 
-def process_one(note: Path, vault: Path, model_python: Path, model: str) -> bool:
+def process_one(note: Path, vault: Path, model_python: Path, model: str,
+                whisper_root: Path = WHISPER, manifest_db: Path = BACKUP_DB,
+                allow_new_transcription: bool = True) -> bool:
     raw_before = note.read_text("utf-8")
     fields, body = parse_note(raw_before)
     if fields.get("transcription_status") != "pending":
@@ -471,29 +623,55 @@ def process_one(note: Path, vault: Path, model_python: Path, model: str) -> bool
             raise ValueError("Existing sidecar has wrong recording identity or format")
         print("  Existing sync sidecar found: recovering interrupted note publication")
     else:
-        step(1, 3, f"Transcribe {note.name} using local MLX Whisper on Mango")
-        if not model_python.is_file():
-            raise ValueError(f"Installed Mango MLX Python not found: {model_python}")
-        TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="whisper-", dir=TEMP_DIR) as tmp:
-            temp_json = Path(tmp) / "whisper.json"
-            subprocess.run([str(model_python), "-c", WHISPER_RUNNER, str(audio),
-                            str(temp_json), model], check=True)
-            data = json.loads(temp_json.read_text("utf-8"))
-            blocks = make_blocks(data, identity)
-            words = valid_words(data)
-            sync_data = {"format": "voice-archive-sync-v1", "recording_id": identity,
-                         "source": "mlx-whisper", "model": model,
-                         "playback_sha256": digest_file(audio),
-                         "blocks": blocks, "words": words}
-            step(2, 3, f"Publish {len(blocks)} line anchors and {len(words)} timed words")
+        source_digest = fields.get("source_sha256", "")
+        if not re.fullmatch(r"[a-fA-F0-9]{64}", source_digest):
+            raise ValueError(f"Missing/invalid source audio SHA-256: {note}")
+        source_path = None
+        # Only use the vault file as an archive-path hint when it's actually
+        # the original bytes (e.g. audio directly within the vault).
+        if digest_file(audio) == source_digest:
+            source_path = audio
+        transcript = cached_transcript(source_digest, source_path, whisper_root)
+        if transcript is not None:
+            step(1, 3, "Found original word timestamps; skip Whisper transcription")
+            sync_data = sync_from_transcript(transcript, identity, source_digest, digest_file(audio))
+            step(2, 3, f"Reuse {len(sync_data['blocks'])} line anchors and {len(sync_data['words'])} timed words")
             atomic_create(sync, (json.dumps(sync_data, ensure_ascii=False, indent=2) + "\n").encode(), TEMP_DIR)
+        elif not allow_new_transcription:
+            print("  PENDING: no indexed Whisper transcript and new transcription disabled")
+            return False
+        else:
+            step(1, 3, f"Transcribe {note.name} using local MLX Whisper on Mango")
+            if not model_python.is_file():
+                raise ValueError(f"Installed Mango MLX Python not found: {model_python}")
+            TEMP_DIR.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="whisper-", dir=TEMP_DIR) as tmp:
+                temp_json = Path(tmp) / "whisper.json"
+                subprocess.run([str(model_python), "-c", WHISPER_RUNNER, str(audio),
+                                str(temp_json), model], check=True)
+                data = json.loads(temp_json.read_text("utf-8"))
+                blocks = make_blocks(data, identity)
+                words = valid_words(data)
+                sync_data = {"format": "voice-archive-sync-v1", "recording_id": identity,
+                             "source": "mlx-whisper", "model": model,
+                             "playback_sha256": digest_file(audio),
+                             "blocks": blocks, "words": words}
+                step(2, 3, f"Publish {len(blocks)} line anchors and {len(words)} timed words")
+                atomic_create(sync, (json.dumps(sync_data, ensure_ascii=False, indent=2) + "\n").encode(), TEMP_DIR)
     if note.read_text("utf-8") != raw_before:
         print("  HOLD: note changed during transcription; never overwriting edits")
         return False
     new_body = "\n\n".join(str(block["text"]) for block in sync_data["blocks"])
     updated_header = raw_before.replace('transcription_status: "pending"',
                                         'transcription_status: "ready"', 1)
+    # Mobile created a hash-named note before Mango could see Apple's manifest.
+    # Keep its path/links stable and attach the verified UUID as metadata.
+    if identity.startswith("audio-"):
+        archive_id = archived_uuid(fields.get("source_sha256", ""), None, manifest_db)
+        if archive_id and not fields.get("archive_recording_id"):
+            updated_header = updated_header.replace('transcription_status: "ready"',
+                                                    f'archive_recording_id: {yaml_string(archive_id)}\n'
+                                                    'transcription_status: "ready"', 1)
     if updated_header == raw_before:
         raise ValueError("Pending note status marker missing; refusing overwrite")
     atomic_replace_bytes(note, (updated_header.rstrip() + "\n\n" + new_body + "\n").encode("utf-8"))
@@ -501,13 +679,13 @@ def process_one(note: Path, vault: Path, model_python: Path, model: str) -> bool
     return True
 
 
-def process_pending(vault: Path, model_python: Path, model: str, limit: int) -> None:
+def process_pending(vault: Path, model_python: Path, model: str, limit: int,
+                    whisper_root: Path = WHISPER, manifest_db: Path = BACKUP_DB) -> None:
     root = vault / "Voice Archive/Notes"
     if not root.is_dir():
         print("No imported recordings pending; notes folder does not exist.")
         return
-    if not model_python.is_file():
-        raise ValueError(f"Run pending transcription on Mango. MLX Python not found: {model_python}")
+    # Cached transcription reuse works even when MLX is not installed.
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     with (TEMP_DIR / "transcription.lock").open("a+") as handle:
         try:
@@ -523,7 +701,7 @@ def process_pending(vault: Path, model_python: Path, model: str, limit: int) -> 
         print(f"[{'#' * 20}] 1/1 | Pending: {len(candidates)}; limit: {limit}")
         for index, note in enumerate(candidates[:limit], 1):
             print(f"[{index}/{min(len(candidates), limit)}] {note.name}")
-            process_one(note, vault, model_python, model)
+            process_one(note, vault, model_python, model, whisper_root, manifest_db)
 
 
 def import_legacy(vault: Path, source_type: str, stem: str | None, pilot_first: bool,
@@ -552,7 +730,9 @@ def import_legacy(vault: Path, source_type: str, stem: str | None, pilot_first: 
     step(2, 5, "Reuse existing Whisper word-timed transcription")
     data = json.loads((whisper_root / source_type / (row["output_stem"] + ".json")).read_text("utf-8"))
     digest = digest_file(audio)
-    identity = f"vm-{apple_uuid}" if apple_uuid else f"jpr-{digest[:24]}"
+    archive_identity = f"vm-{apple_uuid}" if apple_uuid else f"jpr-{digest[:24]}"
+    prior_note = matching_note(vault, digest, archive_identity)
+    identity = prior_note.stem if prior_note else archive_identity
     blocks = make_blocks(data, identity)
     step(3, 5, "Plan archival recording note and managed listening asset")
     # Keep previous pilot paths and stable logical IDs; audio de-duplicate when possible.
@@ -572,6 +752,10 @@ def import_legacy(vault: Path, source_type: str, stem: str | None, pilot_first: 
                  f"Voice Archive/Audio/sha256-{digest}{playback_ext}")
     note_rel = f"Voice Archive/Notes/{identity}.md"
     sync_rel = f"Voice Archive/Sync/{identity}.sync.json"
+    if prior_note is not None:
+        saved_fields, _ = parse_note(prior_note.read_text("utf-8"))
+        audio_rel = saved_fields["voice_audio"]
+        sync_rel = saved_fields["voice_sync"]
     for rel in [audio_rel, sync_rel, note_rel]:
         print(f"  {'KEEP' if (vault / rel).is_file() else 'CREATE'} {vault / rel}")
     if not apply:
@@ -608,6 +792,11 @@ def import_legacy(vault: Path, source_type: str, stem: str | None, pilot_first: 
                                   f"playback_sha256: {yaml_string(digest_file(asset))}\n"
                                   "tags:\n", 1)
     atomic_create(vault / note_rel, note_data.encode(), TEMP_DIR)
+    if prior_note is not None:
+        fields, body = parse_note(prior_note.read_text("utf-8"))
+        if fields.get("transcription_status") == "pending" and not body.strip():
+            process_one(prior_note, vault, Path("/nonexistent-mlx-python"), MODEL, whisper_root,
+                        manifest_db, allow_new_transcription=False)
     step(5, 5, "Archive identity and existing transcript preserved without retranscription")
 
 
@@ -694,14 +883,16 @@ def main() -> None:
         if args.install_worker:
             install_worker(vault, args.apply)
         elif args.file:
-            import_any(args.file, vault, args.apply, not args.no_transcribe, model_python, args.model)
+            import_any(args.file, vault, args.apply, not args.no_transcribe, model_python,
+                       args.model, args.whisper_root.expanduser(), args.manifest_db.expanduser())
         elif args.source:
             import_legacy(vault, args.source, args.stem, args.pilot_first,
                           args.whisper_root.expanduser(), args.audio_root,
                           args.manifest_db.expanduser(), args.apply)
         elif args.process_pending:
             if args.apply:
-                process_pending(vault, model_python, args.model, args.limit)
+                process_pending(vault, model_python, args.model, args.limit,
+                                args.whisper_root.expanduser(), args.manifest_db.expanduser())
             else:
                 candidates = list((vault / "Voice Archive/Notes").glob("*.md"))
                 pending = sum(parse_note(n.read_text("utf-8"))[0].get("transcription_status") == "pending"
