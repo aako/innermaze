@@ -65,3 +65,12 @@ python3 -m unittest discover -s tests -p 'test_importer.py'
 - For offline playback on iPhone/iPad, iCloud must finish downloading the audio attachment.
 - No real-device Obsidian playback has been verified yet.
 - BRAT installation requires a published GitHub release with three assets.
+
+## Acknowledgments and provenance
+
+Innermaze was independently implemented, with design inspiration from:
+
+- [Interactive Transcripts](https://github.com/andymatuschak/interactive-transcripts) by Andy Matuschak — editable Markdown transcripts with audio timing stored separately.
+- [Media One](https://github.com/semsevens/obsidian-media-transcript) by semsevens — synchronized transcript highlighting and click-to-seek playback.
+
+These are conceptual references, not copied source code or bundled dependencies. Both projects are MIT-licensed. If their code is incorporated in the future, the applicable copyright and license notices must be retained.
