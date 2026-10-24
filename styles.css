@@ -1,0 +1,21 @@
+/* filename: styles.css
+   version: 1.1.0
+   timestamp: 2026-10-24 10:53:00 */
+.vap-root { display: flex; flex-direction: column; height: 100%; gap: 8px; padding: 12px; }
+.vap-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.vap-header h3 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vap-audio { display: block; width: 100%; min-height: 42px; }
+.vap-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.vap-tools button { min-width: 56px; }
+.vap-info { color: var(--text-muted); font-size: var(--font-small); margin-left: auto; }
+.vap-scroll { overflow: auto; overscroll-behavior: contain; flex: 1; padding: 8px 0 30vh; }
+.vap-line { display: flex; gap: 12px; align-items: baseline; padding: 10px 9px; border-left: 3px solid transparent; border-radius: 5px; line-height: 1.65; white-space: pre-wrap; }
+.vap-linked { cursor: pointer; }
+.vap-linked:hover { background: var(--background-modifier-hover); }
+.vap-line.vap-active { border-left-color: var(--interactive-accent); background: var(--background-modifier-hover); }
+.vap-words { flex: 1; overflow-wrap: anywhere; }
+.vap-time { flex: 0 0 45px; font-size: 0.82em; opacity: .55; font-variant-numeric: tabular-nums; user-select: none; }
+.vap-unaligned { opacity: .75; border-left-color: var(--text-warning); }
+.vap-linked:focus-visible { outline: 2px solid var(--interactive-accent); }
+
+.vap-pending { color: var(--text-muted); padding: 14px; line-height: 1.6; }

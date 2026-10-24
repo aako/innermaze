@@ -1,0 +1,37 @@
+name: Innermaze release
+on:
+  push:
+    tags:
+      - '[0-9]*'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check main.js
+          node tests/test_alignment.cjs
+          python3 -m unittest discover -s tests -p 'test_importer.py'
+          version="$(node -p "require('./manifest.json').version")"
+          if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "$version" ]]; then
+            echo "Push a tag that exactly matches manifest.json version: $version" >&2
+            false
+          fi
+      - name: Publish BRAT release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release already exists; preserving its assets"
+          else
+            gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css \
+              --title "$GITHUB_REF_NAME" --notes "Innermaze beta release" --prerelease --verify-tag
+          fi
