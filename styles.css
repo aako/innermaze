@@ -1,5 +1,5 @@
 /* filename: styles.css
-   version: 1.1.0
+   version: 0.1.1
    timestamp: 2026-10-24 10:53:00 */
 .vap-root { display: flex; flex-direction: column; height: 100%; gap: 8px; padding: 12px; }
 .vap-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
@@ -19,3 +19,6 @@
 .vap-linked:focus-visible { outline: 2px solid var(--interactive-accent); }
 
 .vap-pending { color: var(--text-muted); padding: 14px; line-height: 1.6; }
+
+.vap-gap-control { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; font-size: var(--font-small); }
+.vap-gap-control input { margin: 0; accent-color: var(--interactive-accent); cursor: pointer; }

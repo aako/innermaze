@@ -1,5 +1,5 @@
 // filename: main.js
-// version: 0.1.0
+// version: 0.1.1
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
@@ -10,6 +10,10 @@ const AUDIO_DIR = 'Voice Archive/Audio';
 const NOTE_DIR = 'Voice Archive/Notes';
 const SYNC_DIR = 'Voice Archive/Sync';
 const PICKER_MAX_BYTES = 200 * 1024 * 1024; // Desktop CLI handles larger files without buffering.
+// Timed-word gaps are a speech heuristic, not an acoustic silence detector.
+// Keep the original file unchanged and pad both sides so speech is not clipped.
+const MIN_PAUSE_SECONDS = 2.0;
+const PAUSE_PADDING_SECONDS = 0.4;
 const AUDIO_EXTENSIONS = new Set(['m4a', 'mp3', 'wav', 'aif', 'aiff', 'caf', 'flac', 'ogg', 'opus', 'aac', 'webm', 'mp4', 'm4b', 'wma', 'amr']);
 
 function decodeYamlScalar(s) {
@@ -135,6 +139,63 @@ function alignParagraphs(paragraphs, blocks) {
   return alignment;
 }
 
+// Produce seekable intervals from existing word/segment timing. Never cut audio bytes.
+// The sorter and overlap coalescing accommodate ASR timestamps that are out of order.
+function pauseSkipRanges(words, minGap = MIN_PAUSE_SECONDS, padding = PAUSE_PADDING_SECONDS) {
+  if (!Array.isArray(words) || !Number.isFinite(minGap) || minGap <= 0 ||
+      !Number.isFinite(padding) || padding < 0) return [];
+  const timed = words
+    .filter(w => w && Number.isFinite(w.start) && Number.isFinite(w.end) &&
+      w.start >= 0 && w.end > w.start && String(w.text || '').trim())
+    .map(w => ({ start: w.start, end: w.end }))
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  const gaps = [];
+  if (!timed.length) return gaps;
+  let speechEnd = timed[0].end;
+  for (let i = 1; i < timed.length; i++) {
+    const word = timed[i];
+    const gap = word.start - speechEnd;
+    if (gap >= minGap) {
+      const from = speechEnd + padding, to = word.start - padding;
+      if (to - from >= 0.35) gaps.push({ from, to });
+    }
+    speechEnd = Math.max(speechEnd, word.end);
+  }
+  return gaps;
+}
+
+function pauseSkipDestination(ranges, time) {
+  if (!Array.isArray(ranges) || !Number.isFinite(time) || !ranges.length) return null;
+  // Binary search to avoid scanning thousands of intervals each timeupdate.
+  let lo = 0, hi = ranges.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (ranges[mid].from <= time) lo = mid + 1;
+    else hi = mid;
+  }
+  if (!lo) return null;
+  const gap = ranges[lo - 1];
+  // No skip during the audible padding at either side of the speech gap.
+  return time < gap.to - 0.08 ? gap.to : null;
+}
+
+// The last spoken line remains highlighted during any silence, and the next
+// line takes over when its speech starts. Text order may differ after editing.
+function highlightedLineIndex(lines, time) {
+  if (!Array.isArray(lines) || !Number.isFinite(time)) return -1;
+  let firstIndex = -1, firstStart = Infinity;
+  let activeIndex = -1, activeStart = -Infinity;
+  for (let i = 0; i < lines.length; i++) {
+    const block = lines[i]?.anchor;
+    if (!block || !Number.isFinite(block.start) || block.start < 0) continue;
+    if (block.start < firstStart) { firstStart = block.start; firstIndex = i; }
+    if (block.start <= time + 0.02 && block.start >= activeStart) {
+      activeStart = block.start; activeIndex = i;
+    }
+  }
+  return activeIndex >= 0 ? activeIndex : firstIndex;
+}
+
 function formatTime(seconds) {
   if (!Number.isFinite(seconds)) return '--:--';
   const s = Math.max(0, Math.floor(seconds));
@@ -149,6 +210,7 @@ class InnermazeView extends ItemView {
     this.notePath = '';
     this.currentAudio = '';
     this.lines = [];
+    this.pauseRanges = [];
     this.lastHighlight = -1;
     this.loadSequence = 0;
     this.lastSavedAt = 0;
@@ -181,12 +243,24 @@ class InnermazeView extends ItemView {
       if (rate === 1) opt.selected = true;
     }
     speed.addEventListener('change', () => { this.audio.playbackRate = Number(speed.value); });
+    const gapToggle = tools.createEl('label', { cls: 'vap-gap-control' });
+    gapToggle.setAttribute('title', 'Jump over long gaps between transcribed words; original audio is unchanged.');
+    this.gapCheckbox = gapToggle.createEl('input', { type: 'checkbox' });
+    this.gapCheckbox.checked = this.plugin.data.skipPauses !== false;
+    gapToggle.createSpan({ text: 'Skip long pauses' });
+    this.gapCheckbox.addEventListener('change', () => {
+      this.plugin.data.skipPauses = this.gapCheckbox.checked;
+      void this.plugin.saveData(this.plugin.data).catch(error =>
+        new Notice(`Unable to save pause setting: ${error.message || error}`));
+    });
     this.info = tools.createSpan({ cls: 'vap-info' });
     this.scrollEl = root.createDiv({ cls: 'vap-scroll' });
     this.audio.addEventListener('timeupdate', () => {
+      this.skipPauseIfNeeded();
       this.updateHighlight();
       if (this.audio.currentTime - this.lastSavedAt >= 15) this.storeResume();
     });
+    this.audio.addEventListener('seeked', () => { this.updateHighlight(); });
     this.audio.addEventListener('pause', () => { void this.storeResume(); });
     this.audio.addEventListener('ended', () => { void this.storeResume(true); });
     this.audio.addEventListener('loadedmetadata', () => {
@@ -203,6 +277,7 @@ class InnermazeView extends ItemView {
 
   async loadRecording(path) {
     const current = ++this.loadSequence;
+    this.pauseRanges = [];
     const note = this.app.vault.getAbstractFileByPath(path);
     if (!(note instanceof TFile)) { new Notice('Voice Archive note not found.'); return; }
     try {
@@ -225,6 +300,7 @@ class InnermazeView extends ItemView {
   async refreshTranscript() {
     if (!this.notePath || !this.scrollEl) return;
     const current = ++this.loadSequence;
+    this.pauseRanges = [];
     try {
       const note = this.app.vault.getAbstractFileByPath(this.notePath);
       if (!(note instanceof TFile)) return;
@@ -232,6 +308,7 @@ class InnermazeView extends ItemView {
       this.titleEl.setText(parsed.fields.display_title || note.basename);
       const syncFile = this.app.vault.getAbstractFileByPath(parsed.fields.voice_sync);
       if (!(syncFile instanceof TFile)) {
+        this.pauseRanges = [];
         this.lines = [];
         this.scrollEl.empty();
         this.scrollEl.createDiv({cls: 'vap-pending', text: 'Awaiting local transcription on Mango. Audio is already available for playback.'});
@@ -243,6 +320,12 @@ class InnermazeView extends ItemView {
       if (sidecar.recording_id !== parsed.fields.recording_id) throw new Error('Recording identity mismatch.');
       if (current !== this.loadSequence) return;
       const blocks = sidecar.blocks.filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end >= b.start);
+      // Word timestamps permit gap skipping even inside one Markdown paragraph.
+      // If the sidecar contains no valid word timings, conservatively fall back
+      // to line intervals instead. No timestamps means no skipping.
+      const pauseWords = Array.isArray(sidecar.words) && sidecar.words.length
+        ? sidecar.words : blocks;
+      this.pauseRanges = pauseSkipRanges(pauseWords);
       const alignment = alignParagraphs(parsed.paragraphs, blocks);
       this.lines = [];
       this.scrollEl.empty();
@@ -276,14 +359,18 @@ class InnermazeView extends ItemView {
     } catch (error) { this.info.setText(`Transcript error: ${error.message || error}`); }
   }
 
+  skipPauseIfNeeded() {
+    if (!this.audio || this.audio.paused || this.audio.seeking ||
+        this.plugin.data.skipPauses === false || !this.pauseRanges.length) return;
+    const target = pauseSkipDestination(this.pauseRanges, this.audio.currentTime);
+    if (target !== null && (!Number.isFinite(this.audio.duration) || target < this.audio.duration)) {
+      this.audio.currentTime = target;
+    }
+  }
+
   updateHighlight() {
     if (!this.audio || !this.lines.length) return;
-    const t = this.audio.currentTime;
-    let selected = -1;
-    for (let i = 0; i < this.lines.length; i++) {
-      const b = this.lines[i].anchor;
-      if (b && b.start <= t && t < b.end + 0.15) { selected = i; break; }
-    }
+    const selected = highlightedLineIndex(this.lines, this.audio.currentTime);
     if (selected === this.lastHighlight) return;
     if (this.lastHighlight >= 0 && this.lines[this.lastHighlight]) this.lines[this.lastHighlight].el.removeClass('vap-active');
     if (selected >= 0) {
@@ -436,7 +523,7 @@ async function importVaultAudio(plugin, file) {
 
 module.exports = class InnermazePlugin extends Plugin {
   async onload() {
-    this.data = Object.assign({ positions: {} }, await this.loadData() || {});
+    this.data = Object.assign({ positions: {}, skipPauses: true }, await this.loadData() || {});
     if (!this.data.positions) this.data.positions = {};
     this.registerView(VIEW_TYPE, leaf => new InnermazeView(leaf, this));
     this.addCommand({
@@ -487,5 +574,7 @@ module.exports = class InnermazePlugin extends Plugin {
 
 // Exposed exclusively for node-level test harness, not needed by Obsidian.
 if (typeof process !== 'undefined' && process.env && process.env.INNERMAZE_TEST === '1') {
-  module.exports._internals = { parseNote, alignParagraphs, similarity, formatTime, makeGenericNote, isAudioName };
+  module.exports._internals = { parseNote, alignParagraphs, similarity, formatTime,
+    makeGenericNote, isAudioName, pauseSkipRanges, pauseSkipDestination,
+    highlightedLineIndex };
 }

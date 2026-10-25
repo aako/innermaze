@@ -1,6 +1,6 @@
 # Innermaze
 
-**Innermaze 0.1.0** — an Obsidian plugin for listening to audio alongside editable, line-synchronized Markdown transcripts. This is an early pilot; Mac/iOS device playback has not yet been verified.
+**Innermaze 0.1.1** — an Obsidian plugin for listening to audio alongside editable, line-synchronized Markdown transcripts. This is an early pilot; Mac/iOS device playback has not yet been verified.
 
 The Obsidian plugin lives at the repository root: `main.js`, `manifest.json`, and `styles.css`. Its **separate, optional** Mango transcription/import helper is at `tools/innermaze.py`. The helper is never installed or updated by BRAT.
 
@@ -37,6 +37,22 @@ innermaze --file "$HOME/Downloads/sample.m4a" --apply
 
 The helper can import existing Dropbox archive recordings and can install an opt-in 10-minute pending-transcription worker on Mango. The separate helper does **not** overwrite BRAT plugin files. All source audio and canonical archives are read-only.
 
+## Listening: skip long pauses (player 0.1.1)
+
+The **Skip long pauses** checkbox in the Innermaze player is on by default and
+persisted per Obsidian installation. It seeks over gaps of at least two seconds
+between Whisper-timed words (or timed segments when words are unavailable),
+retaining approximately 0.4 seconds before and after speech. It does **not**
+modify or render a new audio file. Uncheck it to listen to the original timing.
+The system uses transcription gaps, not an acoustic silence detector: music or
+other meaningful non-speech within a gap can be skipped. This feature should be
+validated on a variety of recordings before public release.
+
+The current transcript highlight remains on the last spoken line throughout
+pauses and only advances when the next line starts. It never vanishes merely
+because the previous line ended. Both behaviors work in the separate Innermaze
+player opened by **Innermaze: Open player for current voice recording**.
+
 ## Existing Voice Memos transcripts — automatic reuse (Mango helper 0.1.1)
 
 Importing a file with `--file`, or processing a pending note created by the Obsidian mobile importer, now looks up **the source audio SHA-256** in both existing `identity.tsv` indices under `~/Work/Temp/VoiceMemoSaver/Whisper/`. If matching word-timed `.json` exists, Innermaze creates the normal editable Markdown and external `.sync.json` directly; **it does not run MLX Whisper again**. This also works for renamed archived recordings. Repeated imports preserve existing notes and corrections.
@@ -63,8 +79,17 @@ python3 -m unittest discover -s tests -p 'test_importer.py'
 - Existing word/line timestamp data is separate from the editable Markdown; corrections within a paragraph preserve line timing, while paragraph splits/merges can need review.
 - MLX Whisper is Apple-Silicon-only. Cashew should not perform this stage.
 - For offline playback on iPhone/iPad, iCloud must finish downloading the audio attachment.
-- No real-device Obsidian playback has been verified yet.
+- The separate Innermaze player has been opened on Mango. Long-session playback, iPhone, and iPad still need real-device testing.
 - BRAT installation requires a published GitHub release with three assets.
+
+## Acknowledgments and provenance
+
+Innermaze was independently implemented, with design inspiration from:
+
+- [Interactive Transcripts](https://github.com/andymatuschak/interactive-transcripts) by Andy Matuschak — editable Markdown transcripts with audio timing stored separately.
+- [Media One](https://github.com/semsevens/obsidian-media-transcript) by semsevens — synchronized transcript highlighting and click-to-seek playback.
+
+These are conceptual references, not copied source code or bundled dependencies. Both projects are MIT-licensed. If their code is incorporated in the future, the applicable copyright and license notices must be retained.
 
 ## Acknowledgments and provenance
 
