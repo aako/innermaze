@@ -2,7 +2,7 @@
 const Module = require('module');
 const originalLoad = Module._load;
 Module._load = (name, parent, isMain) => name === 'obsidian'
-  ? { Plugin: class {}, ItemView: class {}, Notice: class {}, TFile: class {}, Modal: class {} }
+  ? { Plugin: class {}, PluginSettingTab: class {}, Setting: class {}, ItemView: class {}, Notice: class {}, TFile: class {}, Modal: class {}, MarkdownView: class {}, Platform: { isMobile: false } }
   : originalLoad(name, parent, isMain);
 process.env.INNERMAZE_TEST = '1';
 const assert = require('node:assert/strict');

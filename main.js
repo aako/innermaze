@@ -1,10 +1,10 @@
 // filename: main.js
-// version: 0.1.1
+// version: 0.1.2
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
 
-const { Plugin, ItemView, Notice, TFile, Modal } = require('obsidian');
+const { Plugin, PluginSettingTab, Setting, ItemView, Notice, TFile, Modal, MarkdownView, Platform } = require('obsidian');
 const VIEW_TYPE = 'innermaze-player';
 const AUDIO_DIR = 'Voice Archive/Audio';
 const NOTE_DIR = 'Voice Archive/Notes';
@@ -34,6 +34,19 @@ function parseNote(source) {
   const body = source.slice(match[0].length).trim();
   const paragraphs = body ? body.split(/\r?\n\s*\r?\n+/).map(x => x.trim()).filter(Boolean) : [];
   return { fields, paragraphs };
+}
+
+// Only Voice Archive Markdown notes open a player. Do not treat a filename,
+// ordinary Markdown note, or unrelated plugin's frontmatter as a recording.
+function isRecordingNote(file, source) {
+  if (!(file instanceof TFile) || file.extension !== 'md') return false;
+  const match = String(source).match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match || !/^voice_archive:\s*true\s*$/m.test(match[1])) return false;
+  try {
+    return Boolean(parseNote(source).fields.recording_id);
+  } catch (_) {
+    return false;
+  }
 }
 
 function clean(s) {
@@ -521,23 +534,49 @@ async function importVaultAudio(plugin, file) {
   finally { progress.close(); }
 }
 
+class InnermazeSettingsTab extends PluginSettingTab {
+  constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
+  display() {
+    this.containerEl.empty();
+    new Setting(this.containerEl)
+      .setName('Open player automatically')
+      .setDesc('Open the Innermaze player when you open a Voice Archive recording note. On desktop it appears in the right sidebar; regular notes are unaffected.')
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.data.autoOpenPlayer !== false)
+        .onChange(async enabled => {
+          this.plugin.data.autoOpenPlayer = enabled;
+          await this.plugin.saveData(this.plugin.data);
+          // Enabling should work immediately with the current recording.
+          this.plugin.queueAutoOpen(this.app.workspace.getActiveFile());
+        }));
+  }
+}
+
 module.exports = class InnermazePlugin extends Plugin {
   async onload() {
-    this.data = Object.assign({ positions: {}, skipPauses: true }, await this.loadData() || {});
+    this.data = Object.assign({ positions: {}, skipPauses: true, autoOpenPlayer: true }, await this.loadData() || {});
     if (!this.data.positions) this.data.positions = {};
+    this.autoOpenRequest = 0;
+    this.autoOpenTask = Promise.resolve();
     this.registerView(VIEW_TYPE, leaf => new InnermazeView(leaf, this));
+    this.addSettingTab(new InnermazeSettingsTab(this.app, this));
+    this.registerEvent(this.app.workspace.on('file-open', file => this.queueAutoOpen(file)));
+    this.app.workspace.onLayoutReady(() => this.queueAutoOpen(this.app.workspace.getActiveFile()));
     this.addCommand({
       id: 'open-innermaze-player',
       name: 'Open player for current voice recording',
       callback: async () => {
         const note = this.app.workspace.getActiveFile();
-        if (!note) { new Notice('Open a Voice Archive Markdown note first.'); return; }
-        try { parseNote(await this.app.vault.read(note)); }
-        catch (_) { new Notice('Current note is not an Innermaze recording.'); return; }
-        const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0] || this.app.workspace.getLeaf('tab');
-        if (leaf.getViewState().type !== VIEW_TYPE) await leaf.setViewState({ type: VIEW_TYPE, active: true });
-        await leaf.view.setRecordingPath(note.path);
-        await this.app.workspace.revealLeaf(leaf);
+        if (!(note instanceof TFile) || note.extension !== 'md') {
+          new Notice('Open a Voice Archive Markdown note first.'); return;
+        }
+        try {
+          const source = await this.app.vault.cachedRead(note);
+          if (!isRecordingNote(note, source)) {
+            new Notice('Current note is not an Innermaze recording.'); return;
+          }
+          await this.openPlayerForNote(note);
+        } catch (error) { new Notice(`Innermaze player: ${error.message || error}`); }
       }
     });
     this.addCommand({
@@ -569,12 +608,49 @@ module.exports = class InnermazePlugin extends Plugin {
       }
     }));
   }
+  // Serialize file-open events, so rapid navigation never spawns duplicate panes.
+  queueAutoOpen(file) {
+    const token = ++this.autoOpenRequest;
+    this.autoOpenTask = this.autoOpenTask.catch(() => {}).then(async () => {
+      if (this.data.autoOpenPlayer === false || token !== this.autoOpenRequest) return;
+      if (!(file instanceof TFile) || file.extension !== 'md') return;
+      // Avoid reading every unrelated Markdown note in a large vault.
+      const inArchive = file.path.startsWith(`${NOTE_DIR}/`);
+      const cached = this.app.metadataCache?.getFileCache(file)?.frontmatter;
+      if (!inArchive && cached?.voice_archive !== true) return;
+      const source = await this.app.vault.cachedRead(file);
+      if (token !== this.autoOpenRequest || !isRecordingNote(file, source)) return;
+      await this.openPlayerForNote(file, token);
+    }).catch(error => { console.error('Innermaze auto-open:', error); });
+    return this.autoOpenTask;
+  }
+
+  async openPlayerForNote(file, token = null) {
+    const workspace = this.app.workspace;
+    const mobile = Platform.isMobile;
+    // Keep the transcript editor active on desktop after revealing the player.
+    const editorLeaf = !mobile ? workspace.getActiveViewOfType(MarkdownView)?.leaf : null;
+    let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
+    if (!leaf) leaf = mobile ? workspace.getLeaf('tab') : workspace.getRightLeaf(true);
+    if (!leaf) throw new Error('Obsidian could not create a player pane.');
+    if (leaf.getViewState().type !== VIEW_TYPE) {
+      await leaf.setViewState({ type: VIEW_TYPE, active: false });
+    }
+    if (token !== null && token !== this.autoOpenRequest) return;
+    await leaf.view.setRecordingPath(file.path);
+    if (token !== null && token !== this.autoOpenRequest) return;
+    await workspace.revealLeaf(leaf);
+    if (!mobile && editorLeaf && editorLeaf !== leaf && editorLeaf.view?.file?.path === file.path) {
+      workspace.setActiveLeaf(editorLeaf, { focus: false });
+    }
+  }
+
   async onunload() { /* registered views/listeners are disposed by Obsidian */ }
 };
 
 // Exposed exclusively for node-level test harness, not needed by Obsidian.
 if (typeof process !== 'undefined' && process.env && process.env.INNERMAZE_TEST === '1') {
   module.exports._internals = { parseNote, alignParagraphs, similarity, formatTime,
-    makeGenericNote, isAudioName, pauseSkipRanges, pauseSkipDestination,
+    makeGenericNote, isAudioName, isRecordingNote, pauseSkipRanges, pauseSkipDestination,
     highlightedLineIndex };
 }

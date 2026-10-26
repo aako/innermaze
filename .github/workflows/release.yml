@@ -17,6 +17,7 @@ jobs:
           set -euo pipefail
           node --check main.js
           node tests/test_alignment.cjs
+          node tests/test_auto_open.cjs
           python3 -m unittest discover -s tests -p 'test_importer.py'
           version="$(node -p "require('./manifest.json').version")"
           if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "$version" ]]; then
