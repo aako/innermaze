@@ -1,5 +1,5 @@
 // filename: main.js
-// version: 0.1.2
+// version: 0.1.3
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
@@ -557,6 +557,7 @@ module.exports = class InnermazePlugin extends Plugin {
     this.data = Object.assign({ positions: {}, skipPauses: true, autoOpenPlayer: true }, await this.loadData() || {});
     if (!this.data.positions) this.data.positions = {};
     this.autoOpenRequest = 0;
+    this.lastRecordingPath = "";
     this.autoOpenTask = Promise.resolve();
     this.registerView(VIEW_TYPE, leaf => new InnermazeView(leaf, this));
     this.addSettingTab(new InnermazeSettingsTab(this.app, this));
@@ -566,7 +567,13 @@ module.exports = class InnermazePlugin extends Plugin {
       id: 'open-innermaze-player',
       name: 'Open player for current voice recording',
       callback: async () => {
-        const note = this.app.workspace.getActiveFile();
+        // Once a player tab is active, getActiveFile() may be null. Use the
+        // last verified recording, not an arbitrary document or player title.
+        const active = this.app.workspace.getActiveFile();
+        const remembered = this.lastRecordingPath ||
+          this.app.workspace.getLeavesOfType(VIEW_TYPE)[0]?.view?.notePath || '';
+        const note = active instanceof TFile && active.extension === 'md'
+          ? active : this.app.vault.getAbstractFileByPath(remembered);
         if (!(note instanceof TFile) || note.extension !== 'md') {
           new Notice('Open a Voice Archive Markdown note first.'); return;
         }
@@ -608,12 +615,16 @@ module.exports = class InnermazePlugin extends Plugin {
       }
     }));
   }
-  // Serialize file-open events, so rapid navigation never spawns duplicate panes.
+  // Obsidian emits file-open(null) when a custom player tab becomes active.
+  // Ignore that synthetic event: cancelling in-flight player creation here
+  // left users with no player, or an empty pane. Only real Markdown navigation
+  // can supersede a pending recording request.
   queueAutoOpen(file) {
+    if (file == null) return this.autoOpenTask;
+    if (!(file instanceof TFile) || file.extension !== 'md') return this.autoOpenTask;
     const token = ++this.autoOpenRequest;
     this.autoOpenTask = this.autoOpenTask.catch(() => {}).then(async () => {
       if (this.data.autoOpenPlayer === false || token !== this.autoOpenRequest) return;
-      if (!(file instanceof TFile) || file.extension !== 'md') return;
       // Avoid reading every unrelated Markdown note in a large vault.
       const inArchive = file.path.startsWith(`${NOTE_DIR}/`);
       const cached = this.app.metadataCache?.getFileCache(file)?.frontmatter;
@@ -627,22 +638,23 @@ module.exports = class InnermazePlugin extends Plugin {
 
   async openPlayerForNote(file, token = null) {
     const workspace = this.app.workspace;
-    const mobile = Platform.isMobile;
-    // Keep the transcript editor active on desktop after revealing the player.
-    const editorLeaf = !mobile ? workspace.getActiveViewOfType(MarkdownView)?.leaf : null;
+    // Match the original 0.1.1 manually opened player: an ordinary Obsidian
+    // tab, with the complete audio controls and synchronized transcript.
+    // Sidebar APIs are not consistently available and were never needed.
     let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
-    if (!leaf) leaf = mobile ? workspace.getLeaf('tab') : workspace.getRightLeaf(true);
-    if (!leaf) throw new Error('Obsidian could not create a player pane.');
+    if (!leaf) leaf = workspace.getLeaf('tab');
+    if (!leaf) throw new Error('Obsidian could not create a player tab.');
     if (leaf.getViewState().type !== VIEW_TYPE) {
-      await leaf.setViewState({ type: VIEW_TYPE, active: false });
+      await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
     if (token !== null && token !== this.autoOpenRequest) return;
+    if (typeof leaf.view?.setRecordingPath !== 'function') {
+      throw new Error('Player view did not initialize. Reload the Innermaze plugin.');
+    }
     await leaf.view.setRecordingPath(file.path);
     if (token !== null && token !== this.autoOpenRequest) return;
+    this.lastRecordingPath = file.path;
     await workspace.revealLeaf(leaf);
-    if (!mobile && editorLeaf && editorLeaf !== leaf && editorLeaf.view?.file?.path === file.path) {
-      workspace.setActiveLeaf(editorLeaf, { focus: false });
-    }
   }
 
   async onunload() { /* registered views/listeners are disposed by Obsidian */ }
