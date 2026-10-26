@@ -19,6 +19,7 @@ jobs:
           node tests/test_alignment.cjs
           node tests/test_auto_open.cjs
           node tests/test_lossless_ab.cjs
+          node tests/test_optimized_playback.cjs
           python3 -m unittest discover -s tests -p 'test_importer.py'
           version="$(node -p "require('./manifest.json').version")"
           if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != "$version" ]]; then

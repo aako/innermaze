@@ -1,5 +1,5 @@
 // filename: main.js
-// version: 0.1.5
+// version: 0.1.6
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
@@ -177,6 +177,26 @@ function pauseSkipRanges(words, minGap = MIN_PAUSE_SECONDS, padding = PAUSE_PADD
   return gaps;
 }
 
+// Whisper identifies speech rather than acoustic silence. Trim only the end of
+// recordings with a substantial *trailing* untranscribed gap, retaining a full
+// second of context after the last recognized word. The original remains intact.
+function lastTimedSpeechEnd(words) {
+  if (!Array.isArray(words)) return null;
+  const ends = words.filter(w => w && Number.isFinite(w.start) && Number.isFinite(w.end) &&
+    w.start >= 0 && w.end > w.start && String(w.text || '').trim()).map(w => w.end);
+  return ends.length ? ends.reduce((max, end) => Math.max(max, end), 0) : null;
+}
+function pauseGapsWithTail(ranges, lastSpeechEnd, duration, tailPadding = 1.0) {
+  const gaps = Array.isArray(ranges) ? ranges.slice() : [];
+  if (Number.isFinite(lastSpeechEnd) && lastSpeechEnd > 0 &&
+      Number.isFinite(duration) && duration > 0 &&
+      Number.isFinite(tailPadding) && tailPadding >= 0 &&
+      duration - lastSpeechEnd >= MIN_PAUSE_SECONDS + tailPadding) {
+    gaps.push({ from: lastSpeechEnd + tailPadding, to: duration });
+  }
+  return gaps;
+}
+
 function pauseSkipDestination(ranges, time) {
   if (!Array.isArray(ranges) || !Number.isFinite(time) || !ranges.length) return null;
   // Binary search to avoid scanning thousands of intervals each timeupdate.
@@ -216,7 +236,7 @@ function formatTime(seconds) {
   return (h ? `${h}:${String(m).padStart(2, '0')}:` : `${m}:`) + String(s % 60).padStart(2, '0');
 }
 
-// Innermaze 0.1.5 experimental M4A assembly; no decode, transcode, or vault writes.
+// Lossless M4A assembly; no decode, transcode, or vault writes.
 // Supports ordinary nonfragmented, single-track AAC MP4/M4A. Refuse other layouts.
 
 
@@ -535,9 +555,16 @@ class InnermazeView extends ItemView {
     this.losslessResults = {};
     this.losslessUrls = {};
     this.pendingOriginalPosition = null;
+    this.resumeAfterSwitch = false;
+    this.switchingSource = false;
+    this.closingPlayer = false;
     this.buildNonce = 0;
+    this.preparingLossless = false;
     this.audioFile = null;
-    this.lastSourcePath = '';
+    this.originalDuration = null;
+    this.lastSpeechEnd = null;
+    this.deferredOptimizedMode = null;
+    this.fallbackStarted = false;
 
   }
   getViewType() { return VIEW_TYPE; }
@@ -574,20 +601,14 @@ class InnermazeView extends ItemView {
     gapToggle.createSpan({ text: 'Skip long pauses' });
     this.gapCheckbox.addEventListener('change', () => {
       this.plugin.data.skipPauses = this.gapCheckbox.checked;
+      if (this.gapCheckbox.checked) this.enableOptimizedPlayback();
+      else this.selectLosslessMode('original');
       void this.plugin.saveData(this.plugin.data).catch(error =>
         new Notice(`Unable to save pause setting: ${error.message || error}`));
     });
-    // Opt-in A/B experiment. Neither result is persisted, and normal playback stays the default.
-    const ab = tools.createDiv({ cls: 'vap-ab', attr: { 'aria-label': 'Lossless M4A playback experiment' } });
-    ab.createSpan({text: 'Lossless A/B 0.1.5'});
-    this.abButton = ab.createEl('button', {text: 'Prepare both'});
-    this.abButton.addEventListener('click', () => { void this.prepareLosslessAB(); });
-    this.abSelect = ab.createEl('select', {attr: {'aria-label':'Playback engine'}});
-    for (const [value,label] of [['original','Original (seeks)'],['edit','Edit list (A)'],['packet','Packet copy (B)']]) {
-      this.abSelect.createEl('option',{value,text:label});
-    }
-    this.abSelect.addEventListener('change', () => this.selectLosslessMode(this.abSelect.value));
-    this.abStatus = ab.createDiv({cls:'vap-ab-status',text:'Original playback. Tap Prepare both to test lossless edits.'});
+    // The lossless edit-list engine is automatic; packet-copy fallback is
+    // internal. No experimental playback controls appear in the player.
+    this.prepStatus = tools.createSpan({ cls: 'vap-prep-status' });
     this.info = tools.createSpan({ cls: 'vap-info' });
     this.scrollEl = root.createDiv({ cls: 'vap-scroll' });
     this.audio.addEventListener('timeupdate', () => {
@@ -596,7 +617,9 @@ class InnermazeView extends ItemView {
       if (this.originalTime() - this.lastSavedAt >= 15) this.storeResume();
     });
     this.audio.addEventListener('seeked', () => { this.updateHighlight(); });
-    this.audio.addEventListener('pause', () => { void this.storeResume(); });
+    this.audio.addEventListener('pause', () => {
+      if (!this.switchingSource && !this.closingPlayer) void this.storeResume();
+    });
     this.audio.addEventListener('ended', () => { void this.storeResume(true); });
     this.audio.addEventListener('loadedmetadata', () => {
       const saved = this.pendingOriginalPosition === null
@@ -604,12 +627,27 @@ class InnermazeView extends ItemView {
       this.pendingOriginalPosition = null;
       const playtime = this.toPlaybackTime(saved);
       if (playtime > 0 && Number.isFinite(this.audio.duration) && playtime < this.audio.duration - 0.1) this.audio.currentTime = playtime;
+      this.switchingSource = false;
       this.updateHighlight();
+      if (this.losslessMode === 'original' && Number.isFinite(this.audio.duration)) {
+        this.originalDuration = this.audio.duration;
+        this.enableOptimizedPlayback();
+      }
+      if (this.resumeAfterSwitch) {
+        this.resumeAfterSwitch = false;
+        void this.audio.play().catch(error => {
+          console.warn('Innermaze: automatic playback resume blocked', error);
+          new Notice('Tap Play to resume Innermaze audio.');
+        });
+      }
     });
     this.audio.addEventListener('error', () => {
-      if (this.losslessMode === 'original') return;
-      new Notice('iOS rejected the test M4A; restored original playback.');
-      this.selectLosslessMode('original');
+      if (this.losslessMode === 'edit') void this.usePacketFallback('Edit-list audio rejected by media player');
+      else if (this.losslessMode === 'packet') {
+        console.warn('Innermaze: packet-copy playback rejected; using original player');
+        this.losslessResults.packet = null; // Prevent retry loops on loadedmetadata.
+        this.selectLosslessMode('original');
+      }
     });
     if (this.notePath) await this.loadRecording(this.notePath);
   }
@@ -630,76 +668,124 @@ class InnermazeView extends ItemView {
   }
   releaseLossless() {
     ++this.buildNonce;
-    for(const url of Object.values(this.losslessUrls)) URL.revokeObjectURL(url);
-    this.losslessUrls={}; this.losslessResults={};
-    this.losslessMode='original';
-    if(this.abSelect) this.abSelect.value='original';
+    for (const url of Object.values(this.losslessUrls)) URL.revokeObjectURL(url);
+    this.losslessUrls = {};
+    this.losslessResults = {};
+    this.losslessMode = 'original';
+    this.deferredOptimizedMode = null;
+    this.fallbackStarted = false;
+    this.preparingLossless = false;
+    this.pendingOriginalPosition = null;
+    this.resumeAfterSwitch = false;
+    this.switchingSource = false;
+    if (this.prepStatus) this.prepStatus.setText('');
   }
-  async prepareLosslessAB() {
-    if (!this.audioFile || !this.pauseRanges.length || !this.audio || this.abButton.disabled) {
-      if (!this.pauseRanges.length) new Notice('No long speech gaps found in this recording.');
+
+  // Called on recording load/metadata, or when the user re-enables skipping.
+  // It does not process anything if the checkbox is off or timing is missing.
+  enableOptimizedPlayback() {
+    if (this.plugin.data.skipPauses === false || !this.audioFile ||
+        !Number.isFinite(this.originalDuration) || this.originalDuration <= 0) return;
+    const gaps = pauseGapsWithTail(this.pauseRanges, this.lastSpeechEnd, this.originalDuration);
+    if (!gaps.length) return;
+    if (this.losslessResults.edit && !this.fallbackStarted) {
+      this.selectLosslessMode('edit');
       return;
     }
-    if (this.losslessResults.edit && this.losslessResults.packet) {
-      this.abStatus.setText('Both results ready. Choose A or B to listen; original remains available.');
+    if (this.losslessResults.packet) {
+      this.selectLosslessMode('packet');
       return;
     }
-    const nonce=++this.buildNonce, source=this.currentAudio;
-    this.abButton.disabled=true;
-    let original;
+    if (!this.preparingLossless && !this.fallbackStarted) void this.prepareOptimizedPlayback(gaps);
+  }
+
+  async prepareOptimizedPlayback(gaps) {
+    if (this.preparingLossless || !this.audioFile) return;
+    const nonce = ++this.buildNonce, source = this.currentAudio, note = this.notePath;
+    const active = () => nonce === this.buildNonce && source === this.currentAudio &&
+      note === this.notePath && this.plugin.data.skipPauses !== false;
+    this.preparingLossless = true;
+    if (this.prepStatus) this.prepStatus.setText('Preparing seamless audio…');
     try {
-      const len=this.audioFile.stat?.size||0;
-      if (len>128*1024*1024) throw new Error('Source exceeds the 128 MB test limit; original playback remains available.');
-      if (!Number.isFinite(this.audio.duration) || this.audio.duration<=0) throw new Error('Wait for recording metadata, then retry.');
-      const duration=this.losslessMode==='original' ? this.audio.duration : this.originalDuration;
-      if(!Number.isFinite(duration)||duration<=0)throw new Error('Unknown original duration');
-      this.originalDuration=duration;
-      this.abStatus.setText('Reading original M4A into temporary memory…');
-      original=new Uint8Array(await this.app.vault.readBinary(this.audioFile));
-      if(nonce!==this.buildNonce||source!==this.currentAudio)return;
-      for(const [mode,label,fn] of [['edit','Edit list',createEditListAudio],['packet','Packet copy',createPacketCopyAudio]]) {
-        this.abStatus.setText('Building '+label+' M4A…');
-        // Yield to render the status before the synchronous byte-level assembly.
-        await new Promise(resolve=>setTimeout(resolve,15));
-        if(nonce!==this.buildNonce||source!==this.currentAudio)return;
-        const start=performance.now(),result=fn(original,this.pauseRanges,duration);
-        result.elapsed=Math.round(performance.now()-start);
-        this.losslessResults[mode]=result;
+      const audioFile = this.audioFile;
+      if (!/\.m4a$/i.test(audioFile.path) || (audioFile.stat?.size || 0) > 128 * 1024 * 1024) {
+        throw new Error('Unsupported source type or size for lossless M4A editing');
       }
-      if(nonce!==this.buildNonce||source!==this.currentAudio)return;
-      const a=this.losslessResults.edit,b=this.losslessResults.packet;
-      this.abStatus.setText('Ready · A '+a.elapsed+' ms / '+(a.blob.size/1024/1024).toFixed(1)+' MB · B '+b.elapsed+' ms / '+(b.blob.size/1024/1024).toFixed(1)+' MB · '+a.cuts+' pauses');
-      new Notice('Both M4A variants ready. Choose A or B.');
-    }catch(e){
-      if(nonce===this.buildNonce){
-        this.abStatus.setText('Could not build A/B: '+(e?.message||e));
-        new Notice('Lossless M4A test: '+(e?.message||e));
+      const original = new Uint8Array(await this.app.vault.readBinary(audioFile));
+      if (!active()) return;
+      // Rebuild the MP4 edit list; no AAC decoding, re-encoding, or vault write.
+      try {
+        const result = createEditListAudio(original, gaps, this.originalDuration);
+        if (!active()) return;
+        this.losslessResults.edit = result;
+        this.selectLosslessMode('edit');
+      } catch (editError) {
+        console.warn('Innermaze edit-list optimization unavailable, trying packet copy:', editError);
+        const result = createPacketCopyAudio(original, gaps, this.originalDuration);
+        if (!active()) return;
+        this.losslessResults.packet = result;
+        this.fallbackStarted = true;
+        this.selectLosslessMode('packet');
       }
-    }finally{this.abButton.disabled=false;original=null;}
-  }
-  selectLosslessMode(mode) {
-    if (!['original','edit','packet'].includes(mode))return;
-    if (mode!=='original' && !this.losslessResults[mode]) {
-      this.abSelect.value=this.losslessMode;
-      new Notice('Tap Prepare both before selecting this playback mode.');return;
+    } catch (error) {
+      if (active()) console.warn('Innermaze: optimized playback unavailable; retaining original audio', error);
+    } finally {
+      if (nonce === this.buildNonce) {
+        this.preparingLossless = false;
+        if (this.prepStatus) this.prepStatus.setText('');
+      }
     }
-    if(mode===this.losslessMode)return;
-    const position=this.originalTime();
+  }
+
+  // Packet copying is only attempted after edit-list creation or decoding fails.
+  // It is a hidden fallback; the visible skip checkbox retains the same meaning.
+  async usePacketFallback(reason) {
+    if (this.fallbackStarted || this.losslessMode === 'original') return;
+    this.fallbackStarted = true;
+    console.warn('Innermaze: edit-list playback failed; attempting packet-copy fallback:', reason);
+    this.selectLosslessMode('original');
+    if (!this.audioFile || this.plugin.data.skipPauses === false ||
+        !Number.isFinite(this.originalDuration)) return;
+    const nonce = ++this.buildNonce, source = this.currentAudio, note = this.notePath;
+    const audioFile = this.audioFile;
+    try {
+      if (!/\.m4a$/i.test(audioFile.path) || (audioFile.stat?.size || 0) > 128*1024*1024) return;
+      const original = new Uint8Array(await this.app.vault.readBinary(audioFile));
+      if (nonce !== this.buildNonce || source !== this.currentAudio || note !== this.notePath ||
+          this.plugin.data.skipPauses === false) return;
+      const gaps = pauseGapsWithTail(this.pauseRanges, this.lastSpeechEnd, this.originalDuration);
+      if (!gaps.length) return;
+      this.losslessResults.packet = createPacketCopyAudio(original, gaps, this.originalDuration);
+      if (nonce === this.buildNonce && source === this.currentAudio && note === this.notePath) {
+        this.selectLosslessMode('packet');
+      }
+    } catch (error) {
+      console.warn('Innermaze: packet-copy fallback unavailable; using original player', error);
+    }
+  }
+
+  selectLosslessMode(mode) {
+    if (!['original', 'edit', 'packet'].includes(mode)) return;
+    if (mode !== 'original' && (!this.losslessResults[mode] ||
+        this.plugin.data.skipPauses === false)) return;
+    if (mode === this.losslessMode || !this.audioFile || !this.audio) return;
+    const position = this.originalTime();
+    const wasPlaying = !this.audio.paused;
+    this.switchingSource = true;
     this.audio.pause();
-    this.pendingOriginalPosition=position;
-    this.losslessMode=mode;
-    this.abSelect.value=mode;
-    if(mode!=='original'&&!this.losslessUrls[mode])this.losslessUrls[mode]=URL.createObjectURL(this.losslessResults[mode].blob);
-    const url=mode==='original'?this.app.vault.getResourcePath(this.audioFile):this.losslessUrls[mode];
-    this.audio.src=url;
+    this.pendingOriginalPosition = position;
+    this.resumeAfterSwitch = wasPlaying;
+    this.losslessMode = mode;
+    if (mode !== 'original' && !this.losslessUrls[mode]) {
+      this.losslessUrls[mode] = URL.createObjectURL(this.losslessResults[mode].blob);
+    }
+    this.audio.src = mode === 'original' ? this.app.vault.getResourcePath(this.audioFile) : this.losslessUrls[mode];
     this.audio.load();
-    this.abStatus.setText(mode==='original'?'Original media + live seeks.':
-      (mode==='edit'?'A: original AAC with playback edit list.':'B: copied AAC packets, new M4A.')+' Press Play; no automatic pause seeks.');
   }
 
   async setRecordingPath(path) {
-    this.notePath = path;
     if (this.audio) await this.loadRecording(path);
+    else this.notePath = path;
   }
 
   async loadRecording(path) {
@@ -713,17 +799,19 @@ class InnermazeView extends ItemView {
       if (!(audioFile instanceof TFile)) throw new Error(`Audio missing: ${fields.voice_audio}`);
       if (current !== this.loadSequence) return;
       this.titleEl.setText(fields.display_title || note.basename);
-      this.notePath = path;
-      if (this.currentAudio !== audioFile.path) {
+      const sourceChanged = this.currentAudio !== audioFile.path;
+      const noteChanged = Boolean(this.notePath && this.notePath !== path);
+      if (sourceChanged || noteChanged) {
         this.audio.pause();
         this.releaseLossless();
         this.currentAudio = audioFile.path;
         this.audioFile = audioFile;
         this.originalDuration = null;
-        this.abStatus.setText('Original playback. Tap Prepare both to test lossless edits.');
+        this.lastSpeechEnd = null;
         this.audio.src = this.app.vault.getResourcePath(audioFile);
         this.audio.load();
       }
+      this.notePath = path;
       await this.refreshTranscript();
     } catch (error) { this.info.setText(String(error.message || error)); new Notice(String(error.message || error)); }
   }
@@ -757,6 +845,7 @@ class InnermazeView extends ItemView {
       const pauseWords = Array.isArray(sidecar.words) && sidecar.words.length
         ? sidecar.words : blocks;
       this.pauseRanges = pauseSkipRanges(pauseWords);
+      this.lastSpeechEnd = lastTimedSpeechEnd(pauseWords);
       const alignment = alignParagraphs(parsed.paragraphs, blocks);
       this.lines = [];
       this.scrollEl.empty();
@@ -787,6 +876,7 @@ class InnermazeView extends ItemView {
       this.info.setText(`${matched}/${parsed.paragraphs.length} lines aligned` + (matched !== parsed.paragraphs.length ? ' · review unaligned lines' : ''));
       this.lastHighlight = -1;
       this.updateHighlight();
+      this.enableOptimizedPlayback();
     } catch (error) { this.info.setText(`Transcript error: ${error.message || error}`); }
   }
 
@@ -819,8 +909,9 @@ class InnermazeView extends ItemView {
     await this.plugin.saveData(this.plugin.data);
   }
   async onClose() {
-    if (this.audio) { this.audio.pause(); await this.storeResume(); }
-    this.releaseLossless();
+    this.closingPlayer = true;
+    try { if (this.audio) { this.audio.pause(); await this.storeResume(); } }
+    finally { this.releaseLossless(); }
   }
 }
 
@@ -961,7 +1052,7 @@ class InnermazeSettingsTab extends PluginSettingTab {
     this.containerEl.empty();
     new Setting(this.containerEl)
       .setName('Open player automatically')
-      .setDesc('Open the Innermaze player when you open a Voice Archive recording note. On desktop it appears in the right sidebar; regular notes are unaffected.')
+      .setDesc('Open the Innermaze player in a tab when you open a Voice Archive recording note; regular notes are unaffected.')
       .addToggle(toggle => toggle
         .setValue(this.plugin.data.autoOpenPlayer !== false)
         .onChange(async enabled => {
@@ -1092,5 +1183,7 @@ module.exports = class InnermazePlugin extends Plugin {
 if (typeof process !== 'undefined' && process.env && process.env.INNERMAZE_TEST === '1') {
   module.exports._internals = { parseNote, alignParagraphs, similarity, formatTime,
     makeGenericNote, isAudioName, isRecordingNote, pauseSkipRanges, pauseSkipDestination,
-    highlightedLineIndex, createEditListAudio,createPacketCopyAudio,makeSegments,originalToCompiled,compiledToOriginal };
+    highlightedLineIndex, createEditListAudio, createPacketCopyAudio, makeSegments,
+    originalToCompiled, compiledToOriginal, lastTimedSpeechEnd, pauseGapsWithTail,
+    InnermazeView };
 }

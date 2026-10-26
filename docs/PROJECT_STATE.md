@@ -1,55 +1,23 @@
-# Innermaze Project State
+# Innermaze Project State — 2026-10-26
 
-## Version and release discipline
+## Production and device acceptance
 
-- Current production BRAT release: `0.1.3` (confirmed installed in Cabinet).
-- Proposed fix: `0.1.4`, not published until explicitly approved.
-- `0.1.4` adds no user-data migrations and changes no recording or transcription files.
+- `0.1.5` has been published through GitHub/BRAT. User confirmed both temporary, losslessly assembled M4A approaches (MP4 edit lists and AAC packet copying) work without audible interruption in Obsidian on iOS, **both locked and unlocked**. This is real-device acceptance of the A/B mechanisms, not of the next version.
+- `0.1.6` is a prepared source candidate **not yet published or device-tested**. This promotes edit-list preparation to the ordinary player and retains packet copying as a hidden automatic fallback; neither appears in the UI.
+- The old player with `currentTime` seeks remains as the last-resort fallback and is used when Skip long pauses is disabled (without seeking) or optimization cannot be performed.
 
-## Confirmed defect
+## 0.1.6 changes
 
-The 2026-10-26 runtime probe shows `getLeavesOfType('innermaze-player')` returns
-an existing leaf whose declared type is correct, but whose view lacks
-`setRecordingPath`, an audio element, and an initialized note. Calls to
-`openPlayerForNote` fail before `revealLeaf`.
+- Existing Skip long pauses checkbox (default on) now prepares a temporary lossless M4A using MP4 edit lists automatically after both audio metadata and word timings are available. It retains the native HTML audio element, transcript highlighting, playback-speed control, and original-time position mapping.
+- If edit-list **construction** fails, automatically attempt the packet-copy builder. If the edit-list **audio source** is rejected by the media element, revert to original and try packet copying once. If that is also rejected, stay on the original without any loops. Fallback mode is not user-facing; diagnostics go to the developer console.
+- Original M4A and transcript/timing files are never modified. Temporary Blob URLs are revoked on note change and player close; repeated toggles for the same loaded note reuse available in-memory results.
+- End dead air: add a trailing gap only when the last recognized word is at least three seconds before the original end. Retain one second after the last recognized word. Sidecar word/segment timestamps are used, not acoustic silence detection. If no reliable timestamps, no tail trimming.
+- Limit optimization to ordinary M4A files not exceeding 128 MiB. Others retain the existing playback behavior. No Cloud/FFmpeg/WebAssembly dependency, no new permanent audio files, no transcription helper or LaunchAgent changes.
+- Source replacement during *ongoing* playback attempts to resume at the mapped position. iOS-specific autoplay restrictions and locked-device transition timing still require manual testing; tapping Play remains possible if WebKit blocks auto-resume.
 
-Obsidian 1.7.2+ defers background views. An existing leaf can contain a
-`DeferredView` rather than `InnermazeView`. Obsidian's developer documentation
-prescribes awaiting `workspace.revealLeaf(leaf)` before using the custom view,
-or `leaf.loadIfDeferred()` when needed. This is the verified cause of the
-`Player view did not initialize` exception, not a BRAT or transcript issue.
+## Verification and release discipline
 
-## Proposed fix and verification
-
-- Reveal existing tab, optionally loadIfDeferred if still deferred, and only
-  then call `InnermazeView.setRecordingPath`.
-- Preserve one player tab, no duplicate tabs, manual and auto-open paths,
-  and ignoring `file-open(null)` events.
-- Regression tests simulate both reveal-driven and fallback deferred hydration.
-- JavaScript and Python test suites must pass before promotion.
-- Real-device Obsidian testing and Mac/iOS/iPad playback are **not yet verified**
-  for this candidate; do not describe them as passed.
-
-## Reliability rules
-
-- No rewriting audio, transcript text, timestamp JSON, or human review decisions.
-- Never bulk-import or start Whisper without user intent.
-- Separate verification/test builds from publishing release tags.
-- A release requires explicit approval after testing in a separate vault.
-
-
-## 0.1.5 Experimental Lossless A/B
-
-Opt-in `Prepare both` button in existing player; nothing processes merely from opening a recording.
-A = multi-entry MP4 edit list selecting speech intervals; original AAC packets left intact.
-B = MP4 single-track AAC packet-table rebuild, deleting the skipped packets; no transcoding.
-No external library, FFmpeg, server, or generated vault file is needed. Both create temporary
-`Blob` URLs and use the unchanged native HTML audio element. Memory released on player close
-(and when opening another note). Maximum input size for experiment: 128 MiB.
-Unsupported MP4 layouts rejected with status; original seek-based player remains untouched.
-Opening iOS files, compressed Blob playback with phone locked, and discontinuity clicks
-require real-device validation. No crossfades: packet joins may click independently of WebKit.
-Source timeline is mapped to compressed timeline for highlights, click-to-seek and resume.
-
-Testing: ffmpeg/ffprobe verifies produced edited clips; Node unit tests guard source
-immutability and time mapping. No transcriber / archive writes or LaunchAgent changes.
+- `node --check main.js` plus alignment, deferred-view auto-open, A/B MP4, automatic playback, and importer tests must pass.
+- The A/B fixtures cover both metadata-first and metadata-last M4A input. Both outputs are valid synthetic M4As; direct iPhone acceptance remains from `0.1.5` only.
+- Publisher must require a clean `~/Code/Innermaze` checkout at exact `0.1.5` main commit, matching `origin/main`, and absent existing tag. It must back up source files under `~/Dropbox/Apps/Troubleshooting/Innermaze` and not touch the Obsidian Cabinet vault, original audio, Markdown, timestamps, or disabled worker.
+- GitHub release workflow triggers only from an explicitly pushed tag; do not claim the release succeeded until the GitHub Action completes.

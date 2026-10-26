@@ -1,6 +1,6 @@
 # Innermaze
 
-**Innermaze 0.1.1** — an Obsidian plugin for listening to audio alongside editable, line-synchronized Markdown transcripts. This is an early pilot; Mac/iOS device playback has not yet been verified.
+**Innermaze 0.1.6** — an Obsidian plugin for listening to audio alongside editable, line-synchronized Markdown transcripts. This is an evolving pilot; the 0.1.5 lossless A/B engines have been verified by the user on iOS, locked and unlocked. The automatic 0.1.6 behavior still needs device testing.
 
 The Obsidian plugin lives at the repository root: `main.js`, `manifest.json`, and `styles.css`. Its **separate, optional** Mango transcription/import helper is at `tools/innermaze.py`. The helper is never installed or updated by BRAT.
 
@@ -24,6 +24,10 @@ This source project is designed to live at `~/Code/Innermaze`. The companion sta
 
 Do not manually install this plugin by copying it to `.obsidian/plugins`; BRAT should own that folder. Do not publish a tag until you're ready to test the release in Obsidian.
 
+## Player auto-open (0.1.3)
+
+Opening a Voice Archive recording note automatically opens the complete Innermaze player in a regular Obsidian tab, matching the original manual command. The existing player tab is reused. Switching to a player tab does not cancel the pending opening operation, and **Open player for current voice recording** can reopen the last verified recording when the player itself has focus. Ordinary Markdown notes remain unaffected. Disable auto-open in Innermaze settings when preferred.
+
 ## Mango transcription helper (optional)
 
 To package the helper into LLMRunner, use your usual **Package New** workflow on `tools/innermaze.py` (complete standalone Python). The stable executable becomes `~/Code/LLMRunner/bin/innermaze`.
@@ -42,8 +46,9 @@ The helper can import existing Dropbox archive recordings and can install an opt
 The **Skip long pauses** checkbox in the Innermaze player is on by default and
 persisted per Obsidian installation. It seeks over gaps of at least two seconds
 between Whisper-timed words (or timed segments when words are unavailable),
-retaining approximately 0.4 seconds before and after speech. It does **not**
-modify or render a new audio file. Uncheck it to listen to the original timing.
+retaining approximately 0.4 seconds before and after speech. It does **not** modify the original audio file. In 0.1.6 it generates a temporary
+lossless in-memory M4A when supported; otherwise it uses the legacy seek method.
+Uncheck it to listen to the original timing.
 The system uses transcription gaps, not an acoustic silence detector: music or
 other meaningful non-speech within a gap can be skipped. This feature should be
 validated on a variety of recordings before public release.
@@ -79,7 +84,7 @@ python3 -m unittest discover -s tests -p 'test_importer.py'
 - Existing word/line timestamp data is separate from the editable Markdown; corrections within a paragraph preserve line timing, while paragraph splits/merges can need review.
 - MLX Whisper is Apple-Silicon-only. Cashew should not perform this stage.
 - For offline playback on iPhone/iPad, iCloud must finish downloading the audio attachment.
-- The separate Innermaze player has been opened on Mango. Long-session playback, iPhone, and iPad still need real-device testing.
+- The separate Innermaze player has been opened on Mango. The 0.1.5 lossless A/B files passed iOS locked/unlocked tests; the 0.1.6 automatic-switching behavior still needs real-device testing.
 - BRAT installation requires a published GitHub release with three assets.
 
 ## Acknowledgments and provenance
@@ -99,3 +104,19 @@ Innermaze was independently implemented, with design inspiration from:
 - [Media One](https://github.com/semsevens/obsidian-media-transcript) by semsevens — synchronized transcript highlighting and click-to-seek playback.
 
 These are conceptual references, not copied source code or bundled dependencies. Both projects are MIT-licensed. If their code is incorporated in the future, the applicable copyright and license notices must be retained.
+
+## Automatic seamless pause skipping (0.1.6)
+
+The existing **Skip long pauses** checkbox (default on) now prepares a temporary
+lossless M4A edit-list source automatically once the note's transcript timing
+and original audio metadata are available. Its original AAC data is unchanged.
+Packet-copy M4A is built **only if** edit-list assembly or media playback fails;
+the fallback isn't shown as an interface selector. Other source formats and
+unsupported M4A layouts retain the old seek-based skipping behavior.
+
+The final untranscribed gap is also shortened when at least 3 seconds remain
+after the last recognized word; 1 second is preserved after the last word.
+No permanent audio, transcript, sync, or vault changes occur. Temporary audio
+Blob URLs are released on player close or note change. For verification on
+iOS: check ordinary playback, rapid note switching, pauses toggle, highlighting
+and seeking, resume position, AirPods and locked-screen playback.
