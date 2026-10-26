@@ -1,5 +1,5 @@
 // filename: main.js
-// version: 0.1.3
+// version: 0.1.4
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
@@ -648,13 +648,20 @@ module.exports = class InnermazePlugin extends Plugin {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
     if (token !== null && token !== this.autoOpenRequest) return;
-    if (typeof leaf.view?.setRecordingPath !== 'function') {
-      throw new Error('Player view did not initialize. Reload the Innermaze plugin.');
+    // Obsidian 1.7.2+ restores background tabs as DeferredView instances.
+    // A leaf can report our view type before its InnermazeView is constructed.
+    // Reveal and await hydration BEFORE touching the custom view's methods.
+    await workspace.revealLeaf(leaf);
+    if (leaf.isDeferred && typeof leaf.loadIfDeferred === 'function') {
+      await leaf.loadIfDeferred();
+    }
+    if (token !== null && token !== this.autoOpenRequest) return;
+    if (!(leaf.view instanceof InnermazeView)) {
+      throw new Error('Obsidian could not initialize the Innermaze player view.');
     }
     await leaf.view.setRecordingPath(file.path);
     if (token !== null && token !== this.autoOpenRequest) return;
     this.lastRecordingPath = file.path;
-    await workspace.revealLeaf(leaf);
   }
 
   async onunload() { /* registered views/listeners are disposed by Obsidian */ }
