@@ -1,27 +1,55 @@
 # Innermaze Project State
 
-## Current release
+## Version and release discipline
 
-- Version under publication: **0.1.4** (Obsidian deferred-view playback fix).
-- Previous production release: **0.1.3**; Obsidian runtime probe conclusively reproduced a `DeferredView` without `setRecordingPath`.
-- User explicitly chose testing in the existing Cabinet vault via the normal GitHub/BRAT release, without a separate test vault.
-- Real-device behavior of 0.1.4 remains **unverified until user testing**.
+- Current production BRAT release: `0.1.3` (confirmed installed in Cabinet).
+- Proposed fix: `0.1.4`, not published until explicitly approved.
+- `0.1.4` adds no user-data migrations and changes no recording or transcription files.
 
-## Confirmed cause and fix
+## Confirmed defect
 
-When restoring a background tab, Obsidian may expose a leaf of type `innermaze-player` backed by a `DeferredView`, not yet an `InnermazeView`. Version 0.1.3 called `setRecordingPath` before revealing/hydrating the view, yielding `Player view did not initialize`. Version 0.1.4 reveals the leaf, loads it when deferred, then checks the initialized view and passes the recording path. The player still reuses one tab and ignores synthetic `file-open(null)` events.
+The 2026-10-26 runtime probe shows `getLeavesOfType('innermaze-player')` returns
+an existing leaf whose declared type is correct, but whose view lacks
+`setRecordingPath`, an audio element, and an initialized note. Calls to
+`openPlayerForNote` fail before `revealLeaf`.
 
-## Verified checks before publication
+Obsidian 1.7.2+ defers background views. An existing leaf can contain a
+`DeferredView` rather than `InnermazeView`. Obsidian's developer documentation
+prescribes awaiting `workspace.revealLeaf(leaf)` before using the custom view,
+or `leaf.loadIfDeferred()` when needed. This is the verified cause of the
+`Player view did not initialize` exception, not a BRAT or transcript issue.
 
-- Node syntax check and paragraph-alignment, pause-skip, continuous-highlight tests.
-- Regression tests reproducing deferred view on 0.1.3 and passing on 0.1.4.
-- Auto-open, manual command, tab reuse, mobile simulated tests.
-- 12 Python transcription/importer tests.
-- Actual Obsidian startup/desktop/iOS playback: **requires user test**.
+## Proposed fix and verification
 
-## Safety and release rules
+- Reveal existing tab, optionally loadIfDeferred if still deferred, and only
+  then call `InnermazeView.setRecordingPath`.
+- Preserve one player tab, no duplicate tabs, manual and auto-open paths,
+  and ignoring `file-open(null)` events.
+- Regression tests simulate both reveal-driven and fallback deferred hydration.
+- JavaScript and Python test suites must pass before promotion.
+- Real-device Obsidian testing and Mac/iOS/iPad playback are **not yet verified**
+  for this candidate; do not describe them as passed.
 
-- No audio, timestamp JSON, Markdown transcripts, user edits, Apple Voice Memos or Dropbox archive changes.
-- No background transcription activation or bulk processing.
-- GitHub release tags require a matching manifest and passing CI.
-- Before any future release, record the runtime symptom and add the smallest failing regression test.
+## Reliability rules
+
+- No rewriting audio, transcript text, timestamp JSON, or human review decisions.
+- Never bulk-import or start Whisper without user intent.
+- Separate verification/test builds from publishing release tags.
+- A release requires explicit approval after testing in a separate vault.
+
+
+## 0.1.5 Experimental Lossless A/B
+
+Opt-in `Prepare both` button in existing player; nothing processes merely from opening a recording.
+A = multi-entry MP4 edit list selecting speech intervals; original AAC packets left intact.
+B = MP4 single-track AAC packet-table rebuild, deleting the skipped packets; no transcoding.
+No external library, FFmpeg, server, or generated vault file is needed. Both create temporary
+`Blob` URLs and use the unchanged native HTML audio element. Memory released on player close
+(and when opening another note). Maximum input size for experiment: 128 MiB.
+Unsupported MP4 layouts rejected with status; original seek-based player remains untouched.
+Opening iOS files, compressed Blob playback with phone locked, and discontinuity clicks
+require real-device validation. No crossfades: packet joins may click independently of WebKit.
+Source timeline is mapped to compressed timeline for highlights, click-to-seek and resume.
+
+Testing: ffmpeg/ffprobe verifies produced edited clips; Node unit tests guard source
+immutability and time mapping. No transcriber / archive writes or LaunchAgent changes.

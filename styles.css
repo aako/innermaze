@@ -22,3 +22,8 @@
 
 .vap-gap-control { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; font-size: var(--font-small); }
 .vap-gap-control input { margin: 0; accent-color: var(--interactive-accent); cursor: pointer; }
+
+/* Innermaze 0.1.5, opt-in lossless A/B control */
+.vap-ab { display:flex; flex-wrap:wrap; gap:0.4rem; align-items:center; margin:0.5rem 0; padding:0.5rem; border:1px solid var(--background-modifier-border); border-radius:0.4rem; }
+.vap-ab-status { flex-basis:100%; font-size:var(--font-ui-smaller); opacity:0.8; overflow-wrap:anywhere; }
+.vap-ab button, .vap-ab select { max-width:100%; }

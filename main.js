@@ -1,5 +1,5 @@
 // filename: main.js
-// version: 0.1.4
+// version: 0.1.5
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
@@ -216,6 +216,309 @@ function formatTime(seconds) {
   return (h ? `${h}:${String(m).padStart(2, '0')}:` : `${m}:`) + String(s % 60).padStart(2, '0');
 }
 
+// Innermaze 0.1.5 experimental M4A assembly; no decode, transcode, or vault writes.
+// Supports ordinary nonfragmented, single-track AAC MP4/M4A. Refuse other layouts.
+
+
+const BAD = message => { throw new Error('M4A test: ' + message); };
+function boxList(a, start = 0, end = a.length) {
+  if (!(a instanceof Uint8Array)) BAD('expected Uint8Array');
+  if (start < 0 || end > a.length || end < start) BAD('invalid box range');
+  const view = new DataView(a.buffer, a.byteOffset, a.byteLength);
+  const boxes = [];
+  for (let at = start; at < end;) {
+    if (at + 8 > end) BAD('incomplete box header');
+    let n = view.getUint32(at), header = 8;
+    const type = String.fromCharCode(a[at + 4], a[at + 5], a[at + 6], a[at + 7]);
+    if (n === 1) {
+      if (at + 16 > end) BAD('invalid large-size box');
+      const high = view.getUint32(at + 8), low = view.getUint32(at + 12);
+      n = high * 4294967296 + low;
+      header = 16;
+    } else if (n === 0) { n = end - at; }
+    if (n < header || at + n > end || !Number.isSafeInteger(n)) BAD('invalid box size for ' + type);
+    boxes.push({ type, start: at, end: at + n, header });
+    at += n;
+  }
+  return boxes;
+}
+function child(a, t) { return boxList(a, 8).find(b => b.type === t); }
+function uniqueChild(a, t) {
+  const cs = boxList(a, 8).filter(b => b.type === t);
+  if (cs.length !== 1) BAD('expected one ' + t + ' box');
+  return Uint8Array.from(a.subarray(cs[0].start, cs[0].end));
+}
+function childMaybe(a, t) {
+  const cs = boxList(a, 8).filter(b => b.type === t);
+  if (cs.length > 1) BAD('multiple ' + t + ' boxes');
+  return cs.length ? Uint8Array.from(a.subarray(cs[0].start, cs[0].end)) : null;
+}
+function u16(n) { const a = new Uint8Array(2); new DataView(a.buffer).setUint16(0, n); return a; }
+function u32(n) { if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) BAD('32-bit overflow'); const a = new Uint8Array(4); new DataView(a.buffer).setUint32(0, n); return a; }
+function u64(n) { if (!Number.isSafeInteger(n) || n < 0) BAD('64-bit overflow'); const a = new Uint8Array(8); new DataView(a.buffer).setBigUint64(0, BigInt(n)); return a; }
+function s64(n) { if (!Number.isSafeInteger(n)) BAD('signed 64-bit overflow'); const a = new Uint8Array(8); new DataView(a.buffer).setBigInt64(0, BigInt(n)); return a; }
+function join(xs) { const size = xs.reduce((n, a) => n + a.length, 0); const out = new Uint8Array(size); let at = 0; for (const x of xs) { out.set(x, at); at += x.length; } return out; }
+function makeBox(type, payload) {
+  if (type.length !== 4 || payload.length + 8 > 0xffffffff) BAD('invalid generated box');
+  return join([u32(payload.length + 8), Uint8Array.from(type, c => c.charCodeAt(0)), payload]);
+}
+function rebox(parent, edits, drop = []) {
+  const boxes = boxList(parent, 8);
+  let applied = new Set();
+  const out = [];
+  for (const b of boxes) {
+    if (drop.includes(b.type)) continue;
+    if (Object.prototype.hasOwnProperty.call(edits, b.type)) {
+      if (applied.has(b.type)) BAD('duplicate ' + b.type);
+      out.push(edits[b.type]); applied.add(b.type);
+    } else out.push(parent.slice(b.start, b.end));
+  }
+  for (const [k, val] of Object.entries(edits)) if (!applied.has(k)) out.push(val);
+  return makeBox(String.fromCharCode(...parent.subarray(4, 8)), join(out));
+}
+function dv(a) { return new DataView(a.buffer, a.byteOffset, a.byteLength); }
+function readDurationBox(a, type) {
+  const v = a[8], view = dv(a);
+  const tsOff = v ? 28 : 20, durOff = v ? 32 : 24;
+  if (a.length < durOff + (v ? 8 : 4)) BAD('short ' + type);
+  const timescale = view.getUint32(tsOff);
+  const duration = v ? Number(view.getBigUint64(durOff)) : view.getUint32(durOff);
+  if (!timescale || !Number.isSafeInteger(duration)) BAD('invalid ' + type + ' timing');
+  return { timescale, duration, version: v, durationOffset: durOff };
+}
+function setDuration(a, kind, ticks) {
+  a = Uint8Array.from(a);
+  const view = dv(a), ver = a[8];
+  const off = kind === 'tkhd' ? (ver ? 36 : 28) : (ver ? 32 : 24);
+  if (!Number.isSafeInteger(ticks) || ticks < 0) BAD('invalid duration');
+  if (ver) view.setBigUint64(off, BigInt(ticks));
+  else if (ticks <= 0xffffffff) view.setUint32(off, ticks);
+  else BAD('duration exceeds v0 ' + kind);
+  return a;
+}
+function getEditStart(trak) {
+  const edts = childMaybe(trak, 'edts');
+  if (!edts) return 0;
+  const elst = uniqueChild(edts, 'elst');
+  const v = dv(elst), version = elst[8], count = v.getUint32(12);
+  if (count !== 1 || version > 1) BAD('existing complex edit list not supported');
+  const time = version === 1 ? Number(v.getBigInt64(24)) : v.getInt32(20);
+  const rate = version === 1 ? v.getUint32(32) : v.getUint32(24);
+  if (time < 0 || rate !== 0x00010000) BAD('existing edit list has unsupported offset or playback rate');
+  return time;
+}
+function makeEdts(segments, scaleMovie, scaleMedia, mediaStart) {
+  const entries = [u32(segments.length)];
+  let total = 0;
+  for (const s of segments) {
+    const len = Math.round((s.to - s.from) * scaleMovie);
+    const offset = Math.round(s.from * scaleMedia + mediaStart);
+    if (len <= 0) BAD('empty edit entry');
+    entries.push(u64(len), s64(offset), u16(1), u16(0));
+    total += len;
+  }
+  const elst = makeBox('elst', join([Uint8Array.from([1,0,0,0]), ...entries]));
+  return { edts: makeBox('edts', elst), duration: total };
+}
+function identify(data) {
+  const tops = boxList(data);
+  const moovs = tops.filter(b => b.type === 'moov');
+  const mdats = tops.filter(b => b.type === 'mdat');
+  if (moovs.length !== 1 || mdats.length !== 1 || tops.some(b => ['moof','mfra'].includes(b.type))) BAD('only one nonfragmented M4A audio track is supported');
+  if (!tops.some(b => b.type === 'ftyp')) BAD('missing ftyp');
+  const moovBox = moovs[0], mdatBox = mdats[0];
+  const moov = Uint8Array.from(data.subarray(moovBox.start, moovBox.end));
+  const tracks = boxList(moov, 8).filter(b => b.type === 'trak');
+  if (tracks.length !== 1) BAD('only single-track audio supported');
+  const trak = Uint8Array.from(moov.subarray(tracks[0].start, tracks[0].end));
+  const mdia = uniqueChild(trak, 'mdia');
+  const hdlr = uniqueChild(mdia, 'hdlr');
+  if (String.fromCharCode(...hdlr.subarray(16,20)) !== 'soun') BAD('track is not audio');
+  const mvhd = uniqueChild(moov, 'mvhd');
+  const mdhd = uniqueChild(mdia, 'mdhd');
+  const stbl = uniqueChild(uniqueChild(mdia, 'minf'), 'stbl');
+  const stsd = uniqueChild(stbl, 'stsd');
+  // Restrict experimental packet copying to AAC mp4a; edit-list method can use other sample descriptions.
+  const sampleType = String.fromCharCode(...stsd.subarray(20,24));
+  return { tops, moov, moovBox, mdatBox, trak, mvhd, mdhd, stbl, sampleType,
+    movie: readDurationBox(mvhd,'mvhd'), media: readDurationBox(mdhd,'mdhd'),
+    mediaStart: getEditStart(trak) };
+}
+function makeSegments(gaps, duration) {
+  if (!Number.isFinite(duration) || duration <= 0) BAD('invalid recording duration');
+  const sorted = gaps.filter(g => g && Number.isFinite(g.from) && Number.isFinite(g.to))
+    .map(g => ({from:Math.max(0,Math.min(duration,g.from)),to:Math.max(0,Math.min(duration,g.to))}))
+    .filter(g => g.to > g.from + 0.05).sort((a,b)=>a.from-b.from);
+  const segments = []; let cursor = 0;
+  for (const gap of sorted) {
+    if (gap.to <= cursor) continue;
+    if (gap.from > cursor) segments.push({from:cursor,to:gap.from});
+    cursor = Math.max(cursor,gap.to);
+  }
+  if (duration - cursor > 0.001) segments.push({from:cursor,to:duration});
+  if (!segments.length) BAD('all audio would be removed');
+  return segments;
+}
+function mapSegments(segments) {
+  let out = 0;
+  return segments.map(s=>{ const value = {from:s.from,to:s.to, at:out}; out+=s.to-s.from; return value; });
+}
+function originalToCompiled(segments, t) {
+  if (!segments.length || !Number.isFinite(t)) return 0;
+  if (t <= segments[0].from) return 0;
+  for (let i=0;i<segments.length;i++) {
+    const s=segments[i], end=s.at+s.to-s.from;
+    if (t < s.to) return Math.min(end,s.at+Math.max(0,t-s.from));
+    if (i===segments.length-1) return end;
+    if (t<segments[i+1].from) return end;
+  }
+  return 0;
+}
+function compiledToOriginal(segments,t) {
+  if (!segments.length || !Number.isFinite(t)) return 0;
+  for (const s of segments) if (t < s.at+s.to-s.from) return s.from+Math.max(0,t-s.at);
+  return segments[segments.length-1].to;
+}
+function rewriteChunkOffsets(stbl, delta) {
+  const offsets = childMaybe(stbl, 'stco') || childMaybe(stbl, 'co64');
+  if (!offsets) BAD('no chunk offset table');
+  const type = String.fromCharCode(...offsets.subarray(4,8));
+  const v = dv(offsets), count=v.getUint32(12), step=type==='co64'?8:4;
+  if (16+count*step>offsets.length) BAD('corrupt chunk offset table');
+  for(let i=0;i<count;i++) {
+    const at=16+i*step, old=step===8?Number(v.getBigUint64(at)):v.getUint32(at), dest=old+delta;
+    if (dest<0||!Number.isSafeInteger(dest)) BAD('invalid relocated sample data offset');
+    if(step===8)v.setBigUint64(at,BigInt(dest));else if(dest<=0xffffffff)v.setUint32(at,dest);else BAD('chunk offset exceeds 4GB');
+  }
+  return rebox(stbl,{[type]:offsets});
+}
+function rewriteTrack(trak, changes, duration) {
+  const mdia = uniqueChild(trak,'mdia');
+  const minf = uniqueChild(mdia,'minf');
+  const originalStbl = uniqueChild(minf,'stbl');
+  const stbl = changes.stbl || originalStbl;
+  const newMinf = rebox(minf,{stbl});
+  const newMdia = rebox(mdia,{minf:newMinf, ...(changes.mdhd?{mdhd:changes.mdhd}:{})});
+  const tkhd = setDuration(uniqueChild(trak,'tkhd'),'tkhd',duration);
+  return rebox(trak,{tkhd,mdia:newMdia, ...(changes.edts?{edts:changes.edts}:{})},changes.dropEdts?['edts']:[]);
+}
+function rebuildMoov(info, trak, newMovieDuration) {
+  return rebox(info.moov,{mvhd:setDuration(info.mvhd,'mvhd',newMovieDuration),trak});
+}
+function createEditListAudio(original, gaps, originalDuration) {
+  const data = original instanceof Uint8Array ? original : new Uint8Array(original);
+  const info = identify(data);
+  const duration = Math.min(originalDuration || info.movie.duration/info.movie.timescale, info.movie.duration/info.movie.timescale);
+  const keep = makeSegments(gaps,duration);
+  const edits = makeEdts(keep,info.movie.timescale,info.media.timescale,info.mediaStart);
+  const tops = info.tops.filter(b=>b.type!=='moov');
+  let mdatStart=0, at=0;
+  for(const b of tops){if(b.type==='mdat') mdatStart=at;at+=b.end-b.start;}
+  const delta=mdatStart-info.mdatBox.start;
+  const origMdia=uniqueChild(info.trak,'mdia');
+  const minf=uniqueChild(origMdia,'minf');
+  const stbl=rewriteChunkOffsets(uniqueChild(minf,'stbl'),delta);
+  const trak=rewriteTrack(info.trak,{stbl,edts:edits.edts},edits.duration);
+  const moov=rebuildMoov(info,trak,edits.duration);
+  return {blob:new Blob([...tops.map(b=>data.subarray(b.start,b.end)),moov],{type:'audio/mp4'}),
+    segments:mapSegments(keep),total:edits.duration/info.movie.timescale,cuts:keep.length-1};
+}
+function parseStsz(stbl) {
+  const s=uniqueChild(stbl,'stsz'),v=dv(s),fixed=v.getUint32(12),count=v.getUint32(16);
+  if (count>5000000 || (!fixed && 20+count*4>s.length)) BAD('invalid stsz');
+  return {count,size:i=>fixed||v.getUint32(20+i*4)};
+}
+function parseStsc(stbl) {
+  const s=uniqueChild(stbl,'stsc'),v=dv(s),count=v.getUint32(12),entries=[];
+  if(!count||16+count*12>s.length) BAD('bad stsc');
+  for(let i=0;i<count;i++)entries.push({chunk:v.getUint32(16+i*12),samples:v.getUint32(20+i*12),id:v.getUint32(24+i*12)});
+  if (entries[0].chunk!==1 || entries.some(e=>!e.chunk||!e.samples||e.id!==1)) BAD('unexpected stsc');
+  return entries;
+}
+function parseStts(stbl,sampleCount) {
+  const s=uniqueChild(stbl,'stts'),v=dv(s),count=v.getUint32(12),runs=[];let total=0;
+  if(16+count*8>s.length) BAD('bad stts');
+  for(let i=0;i<count;i++) {const n=v.getUint32(16+i*8),delta=v.getUint32(20+i*8); if(!n||!delta) BAD('bad stts run');runs.push({n,delta});total+=n;}
+  if (total!==sampleCount) BAD('stts sample count mismatch');
+  return runs;
+}
+function parseOffsets(stbl) {
+  const b=childMaybe(stbl,'stco') || childMaybe(stbl,'co64');if(!b) BAD('no chunk offsets');
+  const v=dv(b),count=v.getUint32(12),large=b[4]===99;
+  if(16+count*(large?8:4)>b.length) BAD('bad offsets');
+  return Array.from({length:count},(_,i)=>large?Number(v.getBigUint64(16+i*8)):v.getUint32(16+i*4));
+}
+function createPacketCopyAudio(original,gaps,originalDuration) {
+  const data = original instanceof Uint8Array ? original : new Uint8Array(original);
+  const info=identify(data);
+  if(info.sampleType!=='mp4a') BAD('packet copy supports AAC mp4a only');
+  const disallowed=['ctts','stss','sdtp','saio','saiz'];
+  if(boxList(info.stbl,8).some(b=>disallowed.includes(b.type)))BAD('advanced sample tables not supported for packet copy');
+  const duration=Math.min(originalDuration||info.movie.duration/info.movie.timescale,info.movie.duration/info.movie.timescale);
+  const keep=makeSegments(gaps,duration);
+  const sizes=parseStsz(info.stbl), sc=parseStsc(info.stbl), offsets=parseOffsets(info.stbl), runs=parseStts(info.stbl,sizes.count);
+  let sample=0,run=0,runLeft=runs[0].n,time=0,chosen=[],chunks=[],currentRun=[],totalTicks=0;
+  let block=0; // original chunks grouped by sample count (stsc)
+  for(let i=0;i<offsets.length;i++) {
+    while (block+1<sc.length && i+1>=sc[block+1].chunk)block++;
+    let byte=offsets[i];
+    for(let j=0;j<sc[block].samples && sample<sizes.count;j++) {
+      const sz=sizes.size(sample),step=runs[run].delta;
+      if(byte<info.mdatBox.start+info.mdatBox.header || byte+sz>info.mdatBox.end)BAD('sample outside mdat');
+      const center=(time+step/2-info.mediaStart)/info.media.timescale;
+      const keepIt=keep.some(k=>center>=k.from && center<k.to);
+      if(keepIt) {
+        chosen.push({byte,sz,delta:step,originalFrom:(time-info.mediaStart)/info.media.timescale});
+        totalTicks+=step;
+      }
+      byte+=sz;time+=step;sample++;runLeft--;
+      if(runLeft===0&&sample<sizes.count){run++;runLeft=runs[run].n;}
+    }
+  }
+  if(sample!==sizes.count || !chosen.length)BAD('sample table incomplete or no retained samples');
+  // A single MP4 chunk with concatenated AAC packets. Consecutive bytes remain zero-copy Blob slices.
+  const spans=[];let begin=chosen[0].byte,end=begin+chosen[0].sz;
+  for(let i=1;i<chosen.length;i++){
+    const s=chosen[i];if(s.byte===end)end+=s.sz;
+    else {spans.push({start:begin,end});begin=s.byte;end=s.byte+s.sz;}
+  }
+  spans.push({start:begin,end});
+  let dataBytes=chosen.reduce((n,s)=>n+s.sz,0);
+  if(dataBytes+8>0xffffffff)BAD('packet-copy output larger than 4GB');
+  const ftypBox=info.tops.find(b=>b.type==='ftyp'),ftyp=data.subarray(ftypBox.start,ftypBox.end);
+  const first=ftyp.length+8;
+  const mediaDuration=totalTicks/info.media.timescale;
+  const movieDuration=Math.round(mediaDuration*info.movie.timescale);
+  const runRecords=[];
+  for(const s of chosen) {const last=runRecords[runRecords.length-1];if(last&&last.delta===s.delta)last.n++;else runRecords.push({n:1,delta:s.delta});}
+  const stts=makeBox('stts',join([new Uint8Array(4),u32(runRecords.length),...runRecords.flatMap(r=>[u32(r.n),u32(r.delta)])]));
+  const sizePayload=new Uint8Array(12+chosen.length*4);
+  const sizeView=new DataView(sizePayload.buffer);
+  sizeView.setUint32(8,chosen.length);
+  for(let i=0;i<chosen.length;i++)sizeView.setUint32(12+i*4,chosen[i].sz);
+  const stsz=makeBox('stsz',sizePayload);
+  const stsc=makeBox('stsc',join([new Uint8Array(4),u32(1),u32(1),u32(chosen.length),u32(1)]));
+  const stco=makeBox('stco',join([new Uint8Array(4),u32(1),u32(first)]));
+  const newStbl=rebox(info.stbl,{stts,stsz,stsc,stco},['co64','sgpd','sbgp']);
+  const newMdhd=setDuration(info.mdhd,'mdhd',totalTicks);
+  const trak=rewriteTrack(info.trak,{stbl:newStbl,mdhd:newMdhd,dropEdts:true},movieDuration);
+  const moov=rebuildMoov(info,trak,movieDuration);
+  // Match the output timeline to true packet boundaries rather than rounded Whisper gaps.
+  // Coalesce adjacent retained samples without including discarded sample durations.
+  const map=[];let at=0,from=chosen[0].originalFrom,to=from+chosen[0].delta/info.media.timescale;
+  for(let i=1;i<chosen.length;i++){
+    const s=chosen[i],next=s.originalFrom,nextEnd=next+s.delta/info.media.timescale;
+    if(Math.abs(next-to)<0.00002)to=nextEnd;
+    else {map.push({from:Math.max(0,from),to,at});at+=to-from;from=next;to=nextEnd;}
+  }
+  map.push({from:Math.max(0,from),to,at});
+  const blob=new Blob([ftyp,u32(dataBytes+8),Uint8Array.from([109,100,97,116]),
+    ...spans.map(r=>data.subarray(r.start,r.end)),moov],{type:'audio/mp4'});
+  return {blob,segments:map,total:mediaDuration,cuts:map.length-1,samples:chosen.length};
+}
+
+
+
 class InnermazeView extends ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -228,6 +531,14 @@ class InnermazeView extends ItemView {
     this.loadSequence = 0;
     this.lastSavedAt = 0;
     this.statusText = "";
+    this.losslessMode = 'original';
+    this.losslessResults = {};
+    this.losslessUrls = {};
+    this.pendingOriginalPosition = null;
+    this.buildNonce = 0;
+    this.audioFile = null;
+    this.lastSourcePath = '';
+
   }
   getViewType() { return VIEW_TYPE; }
   getDisplayText() { return 'Innermaze'; }
@@ -246,9 +557,9 @@ class InnermazeView extends ItemView {
     this.audio.classList.add('vap-audio');
     const tools = root.createDiv({ cls: 'vap-tools' });
     const back = tools.createEl('button', { text: '−10s', attr: { 'aria-label': 'Back ten seconds' } });
-    back.addEventListener('click', () => { this.audio.currentTime = Math.max(0, this.audio.currentTime - 10); });
+    back.addEventListener('click', () => { this.seekOriginalTime(Math.max(0, this.originalTime() - 10)); });
     const forward = tools.createEl('button', { text: '+10s', attr: { 'aria-label': 'Forward ten seconds' } });
-    forward.addEventListener('click', () => { this.audio.currentTime = Math.min(this.audio.duration || Infinity, this.audio.currentTime + 10); });
+    forward.addEventListener('click', () => { this.seekOriginalTime(this.originalTime() + 10); });
     tools.createSpan({ text: 'Speed' });
     const speed = tools.createEl('select');
     for (const rate of [0.75, 1, 1.25, 1.5, 1.75, 2]) {
@@ -266,21 +577,124 @@ class InnermazeView extends ItemView {
       void this.plugin.saveData(this.plugin.data).catch(error =>
         new Notice(`Unable to save pause setting: ${error.message || error}`));
     });
+    // Opt-in A/B experiment. Neither result is persisted, and normal playback stays the default.
+    const ab = tools.createDiv({ cls: 'vap-ab', attr: { 'aria-label': 'Lossless M4A playback experiment' } });
+    ab.createSpan({text: 'Lossless A/B 0.1.5'});
+    this.abButton = ab.createEl('button', {text: 'Prepare both'});
+    this.abButton.addEventListener('click', () => { void this.prepareLosslessAB(); });
+    this.abSelect = ab.createEl('select', {attr: {'aria-label':'Playback engine'}});
+    for (const [value,label] of [['original','Original (seeks)'],['edit','Edit list (A)'],['packet','Packet copy (B)']]) {
+      this.abSelect.createEl('option',{value,text:label});
+    }
+    this.abSelect.addEventListener('change', () => this.selectLosslessMode(this.abSelect.value));
+    this.abStatus = ab.createDiv({cls:'vap-ab-status',text:'Original playback. Tap Prepare both to test lossless edits.'});
     this.info = tools.createSpan({ cls: 'vap-info' });
     this.scrollEl = root.createDiv({ cls: 'vap-scroll' });
     this.audio.addEventListener('timeupdate', () => {
       this.skipPauseIfNeeded();
       this.updateHighlight();
-      if (this.audio.currentTime - this.lastSavedAt >= 15) this.storeResume();
+      if (this.originalTime() - this.lastSavedAt >= 15) this.storeResume();
     });
     this.audio.addEventListener('seeked', () => { this.updateHighlight(); });
     this.audio.addEventListener('pause', () => { void this.storeResume(); });
     this.audio.addEventListener('ended', () => { void this.storeResume(true); });
     this.audio.addEventListener('loadedmetadata', () => {
-      const saved = this.plugin.data.positions?.[this.notePath] || 0;
-      if (saved > 0 && Number.isFinite(this.audio.duration) && saved < this.audio.duration - 2) this.audio.currentTime = saved;
+      const saved = this.pendingOriginalPosition === null
+        ? (this.plugin.data.positions?.[this.notePath] || 0) : this.pendingOriginalPosition;
+      this.pendingOriginalPosition = null;
+      const playtime = this.toPlaybackTime(saved);
+      if (playtime > 0 && Number.isFinite(this.audio.duration) && playtime < this.audio.duration - 0.1) this.audio.currentTime = playtime;
+      this.updateHighlight();
+    });
+    this.audio.addEventListener('error', () => {
+      if (this.losslessMode === 'original') return;
+      new Notice('iOS rejected the test M4A; restored original playback.');
+      this.selectLosslessMode('original');
     });
     if (this.notePath) await this.loadRecording(this.notePath);
+  }
+
+  originalTime() {
+    if (!this.audio) return 0;
+    if (this.losslessMode === 'original') return this.audio.currentTime || 0;
+    return compiledToOriginal(this.losslessResults[this.losslessMode]?.segments || [], this.audio.currentTime);
+  }
+  toPlaybackTime(original) {
+    if (this.losslessMode === 'original') return original;
+    return originalToCompiled(this.losslessResults[this.losslessMode]?.segments || [], original);
+  }
+  seekOriginalTime(original) {
+    if (!this.audio) return;
+    const t=this.toPlaybackTime(Math.max(0, original));
+    this.audio.currentTime = Math.min(Number.isFinite(this.audio.duration) ? Math.max(0,this.audio.duration-0.05):t,t);
+  }
+  releaseLossless() {
+    ++this.buildNonce;
+    for(const url of Object.values(this.losslessUrls)) URL.revokeObjectURL(url);
+    this.losslessUrls={}; this.losslessResults={};
+    this.losslessMode='original';
+    if(this.abSelect) this.abSelect.value='original';
+  }
+  async prepareLosslessAB() {
+    if (!this.audioFile || !this.pauseRanges.length || !this.audio || this.abButton.disabled) {
+      if (!this.pauseRanges.length) new Notice('No long speech gaps found in this recording.');
+      return;
+    }
+    if (this.losslessResults.edit && this.losslessResults.packet) {
+      this.abStatus.setText('Both results ready. Choose A or B to listen; original remains available.');
+      return;
+    }
+    const nonce=++this.buildNonce, source=this.currentAudio;
+    this.abButton.disabled=true;
+    let original;
+    try {
+      const len=this.audioFile.stat?.size||0;
+      if (len>128*1024*1024) throw new Error('Source exceeds the 128 MB test limit; original playback remains available.');
+      if (!Number.isFinite(this.audio.duration) || this.audio.duration<=0) throw new Error('Wait for recording metadata, then retry.');
+      const duration=this.losslessMode==='original' ? this.audio.duration : this.originalDuration;
+      if(!Number.isFinite(duration)||duration<=0)throw new Error('Unknown original duration');
+      this.originalDuration=duration;
+      this.abStatus.setText('Reading original M4A into temporary memory…');
+      original=new Uint8Array(await this.app.vault.readBinary(this.audioFile));
+      if(nonce!==this.buildNonce||source!==this.currentAudio)return;
+      for(const [mode,label,fn] of [['edit','Edit list',createEditListAudio],['packet','Packet copy',createPacketCopyAudio]]) {
+        this.abStatus.setText('Building '+label+' M4A…');
+        // Yield to render the status before the synchronous byte-level assembly.
+        await new Promise(resolve=>setTimeout(resolve,15));
+        if(nonce!==this.buildNonce||source!==this.currentAudio)return;
+        const start=performance.now(),result=fn(original,this.pauseRanges,duration);
+        result.elapsed=Math.round(performance.now()-start);
+        this.losslessResults[mode]=result;
+      }
+      if(nonce!==this.buildNonce||source!==this.currentAudio)return;
+      const a=this.losslessResults.edit,b=this.losslessResults.packet;
+      this.abStatus.setText('Ready · A '+a.elapsed+' ms / '+(a.blob.size/1024/1024).toFixed(1)+' MB · B '+b.elapsed+' ms / '+(b.blob.size/1024/1024).toFixed(1)+' MB · '+a.cuts+' pauses');
+      new Notice('Both M4A variants ready. Choose A or B.');
+    }catch(e){
+      if(nonce===this.buildNonce){
+        this.abStatus.setText('Could not build A/B: '+(e?.message||e));
+        new Notice('Lossless M4A test: '+(e?.message||e));
+      }
+    }finally{this.abButton.disabled=false;original=null;}
+  }
+  selectLosslessMode(mode) {
+    if (!['original','edit','packet'].includes(mode))return;
+    if (mode!=='original' && !this.losslessResults[mode]) {
+      this.abSelect.value=this.losslessMode;
+      new Notice('Tap Prepare both before selecting this playback mode.');return;
+    }
+    if(mode===this.losslessMode)return;
+    const position=this.originalTime();
+    this.audio.pause();
+    this.pendingOriginalPosition=position;
+    this.losslessMode=mode;
+    this.abSelect.value=mode;
+    if(mode!=='original'&&!this.losslessUrls[mode])this.losslessUrls[mode]=URL.createObjectURL(this.losslessResults[mode].blob);
+    const url=mode==='original'?this.app.vault.getResourcePath(this.audioFile):this.losslessUrls[mode];
+    this.audio.src=url;
+    this.audio.load();
+    this.abStatus.setText(mode==='original'?'Original media + live seeks.':
+      (mode==='edit'?'A: original AAC with playback edit list.':'B: copied AAC packets, new M4A.')+' Press Play; no automatic pause seeks.');
   }
 
   async setRecordingPath(path) {
@@ -301,8 +715,12 @@ class InnermazeView extends ItemView {
       this.titleEl.setText(fields.display_title || note.basename);
       this.notePath = path;
       if (this.currentAudio !== audioFile.path) {
-        this.currentAudio = audioFile.path;
         this.audio.pause();
+        this.releaseLossless();
+        this.currentAudio = audioFile.path;
+        this.audioFile = audioFile;
+        this.originalDuration = null;
+        this.abStatus.setText('Original playback. Tap Prepare both to test lossless edits.');
         this.audio.src = this.app.vault.getResourcePath(audioFile);
         this.audio.load();
       }
@@ -354,7 +772,7 @@ class InnermazeView extends ItemView {
           el.setAttribute('role', 'button');
           el.setAttribute('tabindex', '0');
           el.setAttribute('aria-label', `Play at ${formatTime(anchor.start)}`);
-          const seek = () => { this.audio.currentTime = anchor.start; void this.audio.play().catch(() => {}); };
+          const seek = () => { this.seekOriginalTime(anchor.start); void this.audio.play().catch(() => {}); };
           el.addEventListener('click', seek);
           el.addEventListener('keydown', event => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); seek(); }
@@ -373,7 +791,7 @@ class InnermazeView extends ItemView {
   }
 
   skipPauseIfNeeded() {
-    if (!this.audio || this.audio.paused || this.audio.seeking ||
+    if (!this.audio || this.losslessMode !== 'original' || this.audio.paused || this.audio.seeking ||
         this.plugin.data.skipPauses === false || !this.pauseRanges.length) return;
     const target = pauseSkipDestination(this.pauseRanges, this.audio.currentTime);
     if (target !== null && (!Number.isFinite(this.audio.duration) || target < this.audio.duration)) {
@@ -383,7 +801,7 @@ class InnermazeView extends ItemView {
 
   updateHighlight() {
     if (!this.audio || !this.lines.length) return;
-    const selected = highlightedLineIndex(this.lines, this.audio.currentTime);
+    const selected = highlightedLineIndex(this.lines, this.originalTime());
     if (selected === this.lastHighlight) return;
     if (this.lastHighlight >= 0 && this.lines[this.lastHighlight]) this.lines[this.lastHighlight].el.removeClass('vap-active');
     if (selected >= 0) {
@@ -396,11 +814,14 @@ class InnermazeView extends ItemView {
 
   async storeResume(ended = false) {
     if (!this.notePath || !this.audio) return;
-    this.lastSavedAt = this.audio.currentTime;
-    this.plugin.data.positions[this.notePath] = ended ? 0 : this.audio.currentTime;
+    this.lastSavedAt = this.originalTime();
+    this.plugin.data.positions[this.notePath] = ended ? 0 : this.lastSavedAt;
     await this.plugin.saveData(this.plugin.data);
   }
-  async onClose() { if (this.audio) { this.audio.pause(); await this.storeResume(); } }
+  async onClose() {
+    if (this.audio) { this.audio.pause(); await this.storeResume(); }
+    this.releaseLossless();
+  }
 }
 
 function isAudioName(name) {
@@ -671,5 +1092,5 @@ module.exports = class InnermazePlugin extends Plugin {
 if (typeof process !== 'undefined' && process.env && process.env.INNERMAZE_TEST === '1') {
   module.exports._internals = { parseNote, alignParagraphs, similarity, formatTime,
     makeGenericNote, isAudioName, isRecordingNote, pauseSkipRanges, pauseSkipDestination,
-    highlightedLineIndex };
+    highlightedLineIndex, createEditListAudio,createPacketCopyAudio,makeSegments,originalToCompiled,compiledToOriginal };
 }
