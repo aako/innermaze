@@ -23,7 +23,7 @@ const ordinary=new TFile('Clippings/Article.md');
 const other=new TFile('Voice Archive/Not a recording.md');
 const outside=new TFile('Elsewhere/Moved recording.md');
 const sources=new Map([[noteA.path,source('a')],[noteB.path,source('b')],[ordinary.path,'# Plain article'],[other.path,'# Not a recording'],[outside.path,source('else')]]);
-let fileOpen=null, startup=null, playerFactory=null, createdTabs=0, revealed=0, activeLeaf=null;
+let fileOpen=null, leafChange=null, startup=null, playerFactory=null, createdTabs=0, revealed=0, activeLeaf=null;
 const playerPaths=[], changedStates=[], loads=[], leaves=[];
 const workspace={
   app:null,activeLeaf:null,
@@ -31,7 +31,7 @@ const workspace={
   getLeavesOfType(type){return leaves.filter(l=>l.getViewState().type===type);},
   getLeaf(mode){if(mode==='tab'){createdTabs++;throw Error('Plugin must never create a second tab');}throw Error('Unexpected getLeaf '+mode);},
   async revealLeaf(l){assert(leaves.includes(l));revealed++;this.activeLeaf=l;},
-  on(event,cb){assert.equal(event,'file-open');fileOpen=cb;return{};},
+  on(event,cb){if(event==='file-open')fileOpen=cb;else if(event==='active-leaf-change')leafChange=cb;else throw Error(event);return{};},
   onLayoutReady(cb){startup=cb;},
 };
 const app={workspace,
@@ -99,8 +99,11 @@ async function scenario(){
  navigate(l2,ordinary);await plugin.autoOpenTask;assert.equal(l2.state.type,'markdown');
  navigate(l2,other);await plugin.autoOpenTask;assert.equal(l2.state.type,'markdown');
  navigate(l2,outside);await plugin.autoOpenTask;assert.equal(l2.view.notePath,outside.path);
- // Native navigation within a FileView to an ordinary note switches to Markdown.
- await l2.view.onLoadFile(ordinary);await plugin.autoOpenTask;
+ // Direct/restored custom view erroneously handed an ordinary note:
+ // the fallback must run after the FileView state setter, not inside it.
+ l2.view.file=ordinary; l2.state={type:'innermaze-player',state:{file:ordinary.path}};
+ await l2.view.onLoadFile(ordinary);
+ await new Promise(resolve=>setTimeout(resolve,10));await plugin.autoOpenTask;
  assert.equal(l2.state.type,'markdown');assert.equal(l2.state.state.file,ordinary.path);
  // Mobile goes through identical path.
  ob.Platform.isMobile=true;navigate(l2,noteA);await plugin.autoOpenTask;
@@ -109,6 +112,23 @@ async function scenario(){
  l2.view={file:noteA};l2.isDeferred=true;
  await commands['open-innermaze-player']();
  assert.equal(loads.length,1);assert.equal(l2.view.notePath,noteA.path);
+ assert.equal(createdTabs,0);
+ // Navigation ordering: file-open may fire BEFORE active leaf's file changes.
+ // The delayed auto-open callback must see the newly committed file and open
+ // its player, instead of silently dropping the event as in 0.1.8.
+ l2.view={file:noteB};l2.state={type:'markdown',state:{file:noteB.path}};
+ workspace.activeLeaf=l2;
+ fileOpen(noteA); // current leaf is still noteB here
+ setTimeout(()=>{l2.view={file:noteA};l2.state={type:'markdown',state:{file:noteA.path}};},0);
+ await plugin.autoOpenTask;
+ assert.equal(l2.state.type,'innermaze-player');
+ assert.equal(l2.view.notePath,noteA.path);
+ // Other file navigation paths can change active leaf without file-open.
+ l2.view={file:noteB};l2.state={type:'markdown',state:{file:noteB.path}};
+ workspace.activeLeaf=l2;
+ leafChange(l2);await plugin.autoOpenTask;
+ assert.equal(l2.state.type,'innermaze-player');
+ assert.equal(l2.view.notePath,noteB.path);
  assert.equal(createdTabs,0);
  assert.equal(notices.length,0);
  console.log('PASS: same file tab, file title and active file, native editor toggle, manual switch, mobile, multiple tabs, ordinary Markdown and DeferredView');

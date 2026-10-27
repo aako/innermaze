@@ -1,7 +1,7 @@
 {
   "id": "innermaze",
   "name": "Innermaze",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "minAppVersion": "1.5.0",
   "description": "An audio library for Obsidian with line-synced playback, editable Markdown transcripts, and local transcription.",
   "author": "aako",

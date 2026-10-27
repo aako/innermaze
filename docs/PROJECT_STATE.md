@@ -1,3 +1,13 @@
+## Release 0.1.9: restore Markdown navigation, auto-open recording notes
+
+0.1.8 **failed in actual Obsidian on Mac**: auto-open did not consistently activate, and manually opened FileView was reused when the user clicked an unrelated Clippings note. The old recording UI stayed visible while the tab and breadcrumb followed the unrelated document. The files were not edited by the view error.
+
+- `InnermazeView.canAcceptExtension()` returns false: automatic Markdown navigation must be handled by Obsidian's Markdown view. Explicit `setViewState` on a verified recording still selects the custom file view for that particular note.
+- `onLoadFile` checks the file is still current after async read. For any unexpected non-recording file loaded by a custom view, it stops/removes old audio, clears transcript, then asynchronously restores Markdown once native FileView.setState has returned; stale deferred work cannot hijack a different file.
+- Auto-open waits one task tick after `file-open` to let Obsidian commit the active note, also listens to `active-leaf-change`, validates both current tab's file and voice_archive frontmatter, and respects deliberate Edit transcript mode.
+- Test both same-tab navigation to Clippings and freshly clicked recordings on real Mac + iPhone. 0.1.8 real-device regression is confirmed; 0.1.9 is NOT device-verified before user testing. Keep 0.1.8 rollback tag until accepted.
+- No recording, Markdown, transcription, audio, sync metadata, importer, worker schedule or vault content changes. Lossless edit-list audio unchanged.
+
 ## Release 0.1.8: recording note is the player tab
 
 - Innermaze now uses Obsidian `FileView` in the SAME `WorkspaceLeaf` as the opened Markdown recording. No second “Innermaze” tab. Old fileless 0.1.7 player tabs are detached on layout restore (only when state has no file), without touching Markdown tabs. FileView owns the note path, so tab title, file-open navigation and workspace active file resolve to the recording note.

@@ -1,5 +1,5 @@
 // filename: main.js
-// version: 0.1.8
+// version: 0.1.9
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
@@ -608,23 +608,53 @@ class InnermazeView extends FileView {
     this.lastSpeechEnd = null;
     this.deferredOptimizedMode = null;
     this.fallbackStarted = false;
+    this.navigationSerial = 0;
 
   }
   getViewType() { return VIEW_TYPE; }
   getDisplayText() { return this.file?.basename || this.notePath.split('/').pop()?.replace(/\.md$/, '') || 'Innermaze'; }
-  canAcceptExtension(extension) { return extension === 'md'; }
+  // Do NOT advertise all Markdown files as navigable in this custom view.
+  // FileView.canAcceptExtension() is consulted by leaf.openFile(): returning
+  // true caused Obsidian to reuse our player when clicking unrelated Clippings.
+  // Our explicit leaf.setViewState({type:VIEW_TYPE,state:{file}}) still opens
+  // verified recording notes; ordinary navigation uses the native Markdown view.
+  canAcceptExtension(_extension) { return false; }
   // FileView makes this the real note's tab, so navigation, backlinks, history,
   // and workspace.getActiveFile() identify the Markdown file, not a utility pane.
   async onLoadFile(file) {
+    const serial = ++this.navigationSerial;
     const source = await this.app.vault.cachedRead(file);
+    if (serial !== this.navigationSerial || this.leaf.view !== this ||
+        this.file?.path !== file.path) return;
     if (!isRecordingNote(file, source)) {
-      // A normal Markdown note opened in the same leaf must stay editable.
-      await this.leaf.setViewState({type:'markdown',state:{file:file.path},active:true});
+      // Defensive safeguard for restored/custom leaf states that bypass
+      // canAcceptExtension. Never leave an old recording visible or audible.
+      if (this.audio) {
+        this.audio.pause();
+        this.releaseLossless();
+        this.audio.removeAttribute('src');
+        this.audio.load();
+      }
+      this.notePath = '';
+      this.currentAudio = '';
+      this.scrollEl?.empty();
+      this.titleEl?.setText('');
+      // Do not recursively change view state inside FileView.setState():
+      // native Obsidian may finish applying its stale state afterward.
+      setTimeout(() => {
+        if (serial !== this.navigationSerial || this.leaf.view !== this ||
+            this.file?.path !== file.path) return;
+        const state = this.leaf.getViewState();
+        if (state.type !== VIEW_TYPE || state.state?.file !== file.path) return;
+        void this.leaf.setViewState({type:'markdown',state:{file:file.path},active:true})
+          .catch(error => console.error('Innermaze: restore Markdown view:', error));
+      }, 0);
       return;
     }
     await this.setRecordingPath(file.path);
   }
   async onUnloadFile() { // FileView may navigate without destroying the view.
+    this.navigationSerial++;
     if (this.audio) {
       this.audio.pause();
       await this.storeResume();
@@ -1238,6 +1268,15 @@ module.exports = class InnermazePlugin extends Plugin {
     this.registerView(VIEW_TYPE, leaf => new InnermazeView(leaf, this));
     this.addSettingTab(new InnermazeSettingsTab(this.app, this));
     this.registerEvent(this.app.workspace.on('file-open', file => this.queueAutoOpen(file)));
+    // Some Obsidian navigation paths emit file-open before the new active leaf
+    // has finished updating. Recheck when focus settles as well, including tabs
+    // restored from a previous workspace layout.
+    this.registerEvent(this.app.workspace.on('active-leaf-change', leaf => {
+      if (!leaf) return;
+      const path = leaf.view?.file?.path || leaf.getViewState()?.state?.file;
+      const file = path && this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) this.queueAutoOpen(file);
+    }));
     this.app.workspace.onLayoutReady(() => {
       // 0.1.7 used a separate ItemView tab with no file in its view state.
       // Close only those obsolete, fileless player tabs; never close a note.
@@ -1309,10 +1348,8 @@ module.exports = class InnermazePlugin extends Plugin {
       }
     }));
   }
-  // Obsidian emits file-open(null) when a custom player tab becomes active.
-  // Ignore that synthetic event: cancelling in-flight player creation here
-  // left users with no player, or an empty pane. Only real Markdown navigation
-  // can supersede a pending recording request.
+  // Ignore file-open(null) from custom-view activation. Real file navigation
+  // invalidates prior work; only verified recording notes may become players.
   queueAutoOpen(file) {
     if (file == null) return this.autoOpenTask;
     if (!(file instanceof TFile) || file.extension !== 'md') return this.autoOpenTask;
@@ -1328,6 +1365,17 @@ module.exports = class InnermazePlugin extends Plugin {
     const token = ++this.autoOpenRequest;
     this.autoOpenTask = this.autoOpenTask.catch(() => {}).then(async () => {
       if (this.data.autoOpenPlayer === false || token !== this.autoOpenRequest) return;
+      // file-open may arrive before WorkspaceLeaf has committed the target file.
+      // Defer one task tick; later active-leaf-change supplies a further chance
+      // without stealing focus or opening a separate tab.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (token !== this.autoOpenRequest) return;
+      const target = this.app.workspace.activeLeaf;
+      const activePath = target?.view?.file?.path || target?.getViewState()?.state?.file;
+      if (activePath !== file.path) return;
+      const edited = this.editingLeaves.get(target);
+      if (edited === file.path) return;
+      if (target.view instanceof InnermazeView && target.view.file?.path === file.path) return;
       // Avoid reading every unrelated Markdown note in a large vault.
       const inArchive = file.path.startsWith(`${NOTE_DIR}/`);
       const cached = this.app.metadataCache?.getFileCache(file)?.frontmatter;
