@@ -1,5 +1,5 @@
 // filename: main.js
-// version: 0.1.6
+// version: 0.1.7
 // timestamp: 2026-10-24 10:53:00
 // Obsidian Innermaze: offline audio + editable plain Markdown + external timing.
 'use strict';
@@ -7,7 +7,8 @@
 const { Plugin, PluginSettingTab, Setting, ItemView, Notice, TFile, Modal, MarkdownView, Platform } = require('obsidian');
 const VIEW_TYPE = 'innermaze-player';
 const AUDIO_DIR = 'Voice Archive/Audio';
-const NOTE_DIR = 'Voice Archive/Notes';
+const NOTE_DIR = 'Voice Archive';
+const LEGACY_NOTE_DIR = 'Voice Archive/Notes';
 const SYNC_DIR = 'Voice Archive/Sync';
 const PICKER_MAX_BYTES = 200 * 1024 * 1024; // Desktop CLI handles larger files without buffering.
 // Timed-word gaps are a speech heuristic, not an acoustic silence detector.
@@ -47,6 +48,48 @@ function isRecordingNote(file, source) {
   } catch (_) {
     return false;
   }
+}
+
+// Recording IDs are immutable frontmatter properties, never derived from a human title.
+function validatedRecordingTitle(value) {
+  const title = String(value ?? '').trim();
+  if (!title || title === '.' || title === '..' || title.length > 160 ||
+      /[\/\\:*?"<>|\x00-\x1f]/.test(title) || /[. ]$/.test(title)) {
+    throw new Error('Use a title of 1–160 characters without filename separators or reserved characters.');
+  }
+  return title;
+}
+
+class RenameRecordingModal extends Modal {
+  constructor(app, plugin, path, title) {
+    super(app); this.plugin = plugin; this.notePath = path; this.previousTitle = title;
+  }
+  onOpen() {
+    this.setTitle('Rename recording');
+    const form = this.contentEl.createEl('form');
+    const input = form.createEl('input', { type: 'text', value: this.previousTitle });
+    input.setAttribute('aria-label', 'Recording title and filename');
+    input.setAttribute('autocomplete', 'off');
+    input.style.width = '100%';
+    const buttons = form.createDiv();
+    const cancel = buttons.createEl('button', { text: 'Cancel', type: 'button' });
+    cancel.addEventListener('click', () => this.close());
+    buttons.createEl('button', { text: 'Rename', type: 'submit' });
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (this.saving) return;
+      this.saving = true;
+      try {
+        const path = await this.plugin.renameRecording(this.notePath, input.value);
+        this.close();
+        new Notice(`Renamed recording: ${path.split('/').pop()}`);
+      } catch (error) {
+        new Notice(`Could not rename recording: ${error.message || error}`, 12000);
+      } finally { this.saving = false; }
+    });
+    input.focus(); input.select();
+  }
+  onClose() { this.contentEl.empty(); }
 }
 
 function clean(s) {
@@ -576,6 +619,16 @@ class InnermazeView extends ItemView {
     root.empty(); root.addClass('vap-root');
     const header = root.createDiv({ cls: 'vap-header' });
     this.titleEl = header.createEl('h3', { text: 'Innermaze' });
+    const rename = header.createEl('button', { text: 'Rename' });
+    rename.addEventListener('click', async () => {
+      const note = this.app.vault.getAbstractFileByPath(this.notePath);
+      if (!(note instanceof TFile)) return;
+      try {
+        const {fields} = parseNote(await this.app.vault.read(note));
+        new RenameRecordingModal(this.app, this.plugin, note.path,
+          fields.display_title || note.basename).open();
+      } catch (error) { new Notice(`Rename unavailable: ${error.message || error}`); }
+    });
     const edit = header.createEl('button', { text: 'Edit transcript' });
     edit.addEventListener('click', async () => {
       if (this.notePath) await this.app.workspace.openLinkText(this.notePath, '', true);
@@ -978,12 +1031,24 @@ function makeGenericNote(id, title, audioPath, digest) {
 async function makeNoteAndOpen(plugin, title, audioPath, digest, progress) {
   const id = `audio-${digest}`;
   const notePath = `${NOTE_DIR}/${id}.md`;
-  progress.step(5, 'Creating editable transcript note');
+  progress.step(5, 'Creating or reusing editable transcript note');
   await ensureFolder(plugin.app, NOTE_DIR);
-  const existing = plugin.app.vault.getAbstractFileByPath(notePath);
-  let note = existing;
+  const matches = [];
+  for (const file of plugin.app.vault.getMarkdownFiles()) {
+    const folder = file.parent?.path || file.path.slice(0, file.path.lastIndexOf('/'));
+    if (folder !== NOTE_DIR && folder !== LEGACY_NOTE_DIR) continue;
+    // Read actual frontmatter: the metadata cache can lag a rename/import on iOS.
+    const source = await plugin.app.vault.cachedRead(file);
+    if (isRecordingNote(file, source) && parseNote(source).fields.recording_id === id) {
+      matches.push(file);
+    } else if (file.path === notePath || file.path === `${LEGACY_NOTE_DIR}/${id}.md`) {
+      throw new Error(`Note destination belongs to different content: ${file.path}`);
+    }
+  }
+  if (matches.length > 1) throw new Error('Several notes have the same recording ID; refusing duplicate import');
+  let note = matches[0] || plugin.app.vault.getAbstractFileByPath(notePath);
+  if (note && !(note instanceof TFile)) throw new Error('Import note path already exists and is not a file.');
   if (!note) note = await plugin.app.vault.create(notePath, makeGenericNote(id, safeTitle(title), audioPath, digest));
-  if (!(note instanceof TFile)) throw new Error('Import note path exists but is not a file.');
   progress.step(6, 'Complete: queued for local Mango transcription');
   await plugin.app.workspace.getLeaf(true).openFile(note);
   new Notice('Audio is in your iCloud vault. Transcription will run on Mango.');
@@ -1065,6 +1130,77 @@ class InnermazeSettingsTab extends PluginSettingTab {
 }
 
 module.exports = class InnermazePlugin extends Plugin {
+  async renameRecording(path, proposedTitle) {
+    const title = validatedRecordingTitle(proposedTitle);
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile) || file.extension !== 'md') throw new Error('Recording note no longer exists.');
+    const source = await this.app.vault.read(file);
+    if (!isRecordingNote(file, source)) throw new Error('This is not an Innermaze recording.');
+    const target = `${NOTE_DIR}/${title}.md`;
+    const collision = this.app.vault.getAbstractFileByPath(target);
+    if (collision && collision !== file) throw new Error(`A note already exists: ${target}`);
+    // Native fileManager rename updates Obsidian links. The original ID, sidecar,
+    // transcription, source title and audio name remain untouched.
+    const oldPath = file.path;
+    if (target !== oldPath) await this.app.fileManager.renameFile(file, target);
+    try {
+      await this.app.fileManager.processFrontMatter(file, fm => { fm.display_title = title; });
+    } catch (error) {
+      // Do not leave the note under a new name with stale metadata if YAML failed.
+      if (file.path !== oldPath && !this.app.vault.getAbstractFileByPath(oldPath)) {
+        try { await this.app.fileManager.renameFile(file, oldPath); }
+        catch (rollbackError) { console.error('Innermaze rename rollback:', rollbackError); }
+      }
+      throw error;
+    }
+    this.relocateRecordingState(oldPath, file.path);
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view?.notePath === file.path && leaf.view?.titleEl) leaf.view.titleEl.setText(title);
+    }
+    return file.path;
+  }
+
+  relocateRecordingState(oldPath, newPath) {
+    if (oldPath === newPath) return;
+    if (Object.prototype.hasOwnProperty.call(this.data.positions || {}, oldPath)) {
+      if (!Object.prototype.hasOwnProperty.call(this.data.positions, newPath)) {
+        this.data.positions[newPath] = this.data.positions[oldPath];
+      }
+      delete this.data.positions[oldPath];
+      void this.saveData(this.data).catch(error => console.warn('Innermaze resume-path migration:',error));
+    }
+    if (this.lastRecordingPath === oldPath) this.lastRecordingPath = newPath;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view?.notePath === oldPath) leaf.view.notePath = newPath;
+    }
+  }
+
+  async migrateLegacyNotes() {
+    const legacy = this.app.vault.getAbstractFileByPath(LEGACY_NOTE_DIR);
+    if (!legacy?.children) return {moved:0,skipped:0};
+    let moved = 0, skipped = 0;
+    for (const note of [...legacy.children]) {
+      if (!(note instanceof TFile) || note.extension !== 'md') continue;
+      try {
+        const source = await this.app.vault.cachedRead(note);
+        if (!isRecordingNote(note, source)) { skipped++; continue; }
+        const target = `${NOTE_DIR}/${note.name}`;
+        if (this.app.vault.getAbstractFileByPath(target)) { skipped++; continue; }
+        const previous = note.path;
+        await this.app.fileManager.renameFile(note, target);
+        this.relocateRecordingState(previous, note.path);
+        moved++;
+      } catch (error) { skipped++; console.warn('Innermaze legacy note migration skipped:', note.path, error); }
+    }
+    // Only remove the old Notes directory if Obsidian confirms it is empty.
+    if (!legacy.children.length && typeof this.app.vault.delete === 'function') {
+      try { await this.app.vault.delete(legacy); }
+      catch (error) { console.warn('Innermaze could not remove empty Notes directory:', error); }
+    }
+    if (skipped) new Notice(`Innermaze moved ${moved} notes; ${skipped} need manual attention.`, 12000);
+    return {moved,skipped};
+  }
+
   async onload() {
     this.data = Object.assign({ positions: {}, skipPauses: true, autoOpenPlayer: true }, await this.loadData() || {});
     if (!this.data.positions) this.data.positions = {};
@@ -1112,6 +1248,17 @@ module.exports = class InnermazePlugin extends Plugin {
           new Notice('Open an audio file within the vault first.'); return;
         }
         await importVaultAudio(this, file);
+      }
+    });
+    this.registerEvent(this.app.vault.on('rename', (file, previousPath) => {
+      if (file instanceof TFile && previousPath !== file.path) this.relocateRecordingState(previousPath, file.path);
+    }));
+    this.addCommand({
+      id: 'organize-voice-archive-notes',
+      name: 'Move recording notes into Voice Archive root',
+      callback: async () => {
+        const result = await this.migrateLegacyNotes();
+        new Notice(`Innermaze: moved ${result.moved} notes; skipped ${result.skipped}.`);
       }
     });
     this.registerEvent(this.app.vault.on('create', file => {
@@ -1185,5 +1332,5 @@ if (typeof process !== 'undefined' && process.env && process.env.INNERMAZE_TEST 
     makeGenericNote, isAudioName, isRecordingNote, pauseSkipRanges, pauseSkipDestination,
     highlightedLineIndex, createEditListAudio, createPacketCopyAudio, makeSegments,
     originalToCompiled, compiledToOriginal, lastTimedSpeechEnd, pauseGapsWithTail,
-    InnermazeView };
+    InnermazeView, validatedRecordingTitle, RenameRecordingModal };
 }

@@ -120,3 +120,11 @@ No permanent audio, transcript, sync, or vault changes occur. Temporary audio
 Blob URLs are released on player close or note change. For verification on
 iOS: check ordinary playback, rapid note switching, pauses toggle, highlighting
 and seeking, resume position, AirPods and locked-screen playback.
+
+## Recording-note organization and naming (0.1.7)
+
+- New notes are created directly in `Voice Archive/`, next to `Audio/` and `Sync/`.
+- To migrate the previous notes once, use Obsidian's command palette: **Innermaze: Move recording notes into Voice Archive root**. Existing transcript text, audio, sync files, and recording identities are preserved. File renaming is performed through Obsidian's file manager, which maintains links; any collisions are skipped. If the old Notes folder is empty, it is removed.
+- Use **Rename** in the player to set both the human-readable player heading and the Markdown note filename, for example `Dream - Chris Wiley sushi restaurant`. The immutable `recording_id`, `source_title`, and timing sidecar are unchanged.
+- The Mango importer finds already-renamed recordings by frontmatter `recording_id` and audio SHA-256, not filename.
+- **Skip long pauses** continues to use the current lossless edit-list engine with the hidden packet fallback.

@@ -1,3 +1,7 @@
+## Release 0.1.7: recording titles and root-level notes
+
+New recording notes live directly in `Voice Archive/`. The opt-in Obsidian command "Move recording notes into Voice Archive root" migrates verified legacy `Voice Archive/Notes/*.md` through Obsidian fileManager; never overwrites collisions. The player Rename action synchronizes Markdown filename and `display_title`, preserving `recording_id`, `voice_sync`, audio, original source titles, transcript and resume position. Mango importer scans root and legacy notes by immutable `recording_id` + SHA and reuses renamed notes. No worker activation.
+
 # Innermaze Project State — 2026-10-26
 
 ## Production and device acceptance

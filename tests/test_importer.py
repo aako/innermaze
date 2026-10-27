@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # filename: test_importer.py
-# version: 0.1.1
+# version: 0.1.2
 # timestamp: 2026-10-24 16:54:00
 from __future__ import annotations
 import hashlib
@@ -61,7 +61,7 @@ class ImporterTests(unittest.TestCase):
         self.directory.cleanup()
 
     def imported(self):
-        return self.vault / 'Voice Archive/Notes' / f'audio-{self.digest}.md'
+        return self.vault / 'Voice Archive' / f'audio-{self.digest}.md'
 
     def test_import_dry_run_creates_nothing(self):
         result = innermaze.import_any(self.sample, self.vault, False, False, Path(sys.executable), innermaze.MODEL)
@@ -108,6 +108,46 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(fields['transcription_status'], 'pending')
         self.assertIn('A human has already edited', body)
         self.assertFalse((self.vault / fields['voice_sync']).exists())
+
+    def test_reimport_renamed_root_note_uses_original_recording_id(self):
+        note = innermaze.import_any(self.sample, self.vault, True, False,
+                                    Path(sys.executable), innermaze.MODEL)
+        renamed = note.with_name('Dream - Chris Wiley sushi restaurant.md')
+        note.rename(renamed)
+        original = renamed.read_text()
+        renamed.write_text(original.replace('display_title: "example"',
+                                            'display_title: "Dream - Chris Wiley sushi restaurant"'))
+        result = innermaze.import_any(self.sample, self.vault, True, False,
+                                      Path(sys.executable), innermaze.MODEL)
+        self.assertEqual(result, renamed)
+        self.assertFalse(note.exists())
+        self.assertEqual(len(innermaze.recording_notes(self.vault)), 1)
+        innermaze.process_pending(self.vault, Path(sys.executable), innermaze.MODEL, 2)
+        fields, body = innermaze.parse_note(renamed.read_text())
+        self.assertEqual(fields['recording_id'], f'audio-{self.digest}')
+        self.assertEqual(fields['transcription_status'], 'ready')
+        self.assertEqual(body.strip(), 'Hi from Mango.')
+
+    def test_legacy_note_folder_reused_after_rename(self):
+        note = innermaze.import_any(self.sample, self.vault, True, False,
+                                    Path(sys.executable), innermaze.MODEL)
+        legacy = self.vault / 'Voice Archive/Notes'
+        legacy.mkdir()
+        moved = legacy / 'A human title.md'
+        note.rename(moved)
+        again = innermaze.import_any(self.sample, self.vault, True, False,
+                                     Path(sys.executable), innermaze.MODEL)
+        self.assertEqual(again, moved)
+        self.assertFalse(note.exists())
+
+    def test_unrelated_markdown_in_archive_root_is_not_a_recording(self):
+        root = self.vault / 'Voice Archive'
+        root.mkdir()
+        (root / 'Some unrelated note.md').write_text('# No YAML\nJust notes.\n')
+        note = innermaze.import_any(self.sample, self.vault, True, False,
+                                    Path(sys.executable), innermaze.MODEL)
+        self.assertEqual(note, self.imported())
+        self.assertEqual(len(innermaze.recording_notes(self.vault)), 1)
 
     def test_existing_vault_audio_does_not_duplicate(self):
         internal = self.vault / 'Imported Audio.m4a'
@@ -220,8 +260,8 @@ class ImporterTests(unittest.TestCase):
         self.apple_manifest([(original.name, 'UUID-ALPHA')])
         innermaze.import_legacy(self.vault, 'voice-memos', 'old-title', False,
                                 self.whisper_root, self.vm, self.manifest, True)
-        self.assertFalse((self.vault / 'Voice Archive/Notes/vm-UUID-ALPHA.md').exists())
-        self.assertEqual(len(list((self.vault / 'Voice Archive/Notes').glob('*.md'))), 1)
+        self.assertFalse((self.vault / 'Voice Archive/vm-UUID-ALPHA.md').exists())
+        self.assertEqual(len(list((self.vault / 'Voice Archive').glob('*.md'))), 1)
         fields, body = innermaze.parse_note(note.read_text())
         self.assertEqual(fields['transcription_status'], 'ready')
         self.assertEqual(body.strip(), 'Existing transcript.')

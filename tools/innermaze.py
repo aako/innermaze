@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # filename: innermaze.py
-# version: 0.1.1
-# timestamp: 2026-10-24 16:54:00
+# version: 0.1.2
+# timestamp: 2026-10-26 14:34:00
 """Innermaze Mango-local audio importer and transcription worker; Obsidian plugin installed via BRAT.
 
 Dry-run default for imports/install. Archives and source audio are read-only.
@@ -163,37 +163,50 @@ def archived_uuid(digest: str, source: Path | None, manifest: Path) -> str | Non
     return "vm-" + logical_id.removeprefix("voice-memos:uuid:")
 
 
-def matching_note(vault: Path, digest: str, preferred_id: str | None = None) -> Path | None:
-    """Reuse old generic/mobile notes and UUID notes without destroying edits.
+def recording_notes(vault: Path) -> list[Path]:
+    """Find marked recording notes at archive root and in legacy Notes/ only."""
+    result = []
+    for directory in (vault / "Voice Archive", vault / "Voice Archive/Notes"):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.md")):
+            try:
+                fields, _ = parse_note(path.read_text("utf-8"))
+            except ValueError:
+                # Ordinary Markdown notes may share the archive root.
+                continue
+            if str(fields.get("voice_archive")).lower() == "true" and fields.get("recording_id"):
+                result.append(path)
+    return result
 
-    Never fold two proven, distinct Apple identities into one note.
-    """
-    directory = vault / "Voice Archive/Notes"
-    if not directory.is_dir():
-        return None
+
+def matching_note(vault: Path, digest: str, preferred_id: str | None = None) -> Path | None:
+    """Reuse a human-renamed note by immutable metadata, not filename."""
+    notes = []
+    for note in recording_notes(vault):
+        fields, _ = parse_note(note.read_text("utf-8"))
+        identity = fields.get("recording_id")
+        hash_value = fields.get("source_sha256")
+        if preferred_id and identity in (preferred_id, f"audio-{digest}") and hash_value != digest:
+            raise ValueError(f"Recording ID is already associated with another audio file: {note}")
+        if hash_value == digest:
+            notes.append((note, fields))
     if preferred_id:
-        exact = directory / f"{preferred_id}.md"
-        if exact.is_file():
-            fields, _ = parse_note(exact.read_text("utf-8"))
-            if fields.get("source_sha256") == digest:
-                return exact
-            raise ValueError(f"Recording ID already used for different audio: {exact}")
-    generic = directory / f"audio-{digest}.md"
-    if generic.is_file():
-        fields, _ = parse_note(generic.read_text("utf-8"))
-        if fields.get("source_sha256") != digest:
-            raise ValueError(f"Hash-named note has conflicting identity: {generic}")
-        return generic
-    if preferred_id is None:
-        candidates = []
-        for note in sorted(directory.glob("*.md")):
-            fields, _ = parse_note(note.read_text("utf-8"))
-            if fields.get("source_sha256") == digest:
-                candidates.append(note)
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            raise ValueError("Audio matches multiple existing archive notes; UUID required")
+        exact = [(note,fields) for note,fields in notes if fields.get("recording_id") == preferred_id]
+        if len(exact) > 1:
+            raise ValueError("Multiple notes share the preferred recording ID")
+        if exact:
+            return exact[0][0]
+        generic = [(note,fields) for note,fields in notes if fields.get("recording_id") == f"audio-{digest}"]
+        if len(generic) > 1:
+            raise ValueError("Multiple notes share the source hash")
+        if generic:
+            return generic[0][0]
+        return None  # Distinct Apple UUIDs must never be merged.
+    if len(notes) == 1:
+        return notes[0][0]
+    if len(notes) > 1:
+        raise ValueError("Audio matches multiple existing archive notes; UUID required")
     return None
 
 
@@ -432,9 +445,8 @@ def find_managed_audio(vault: Path, digest: str) -> Path | None:
         # Audio transcoded to M4A retains the original *source* hash in its
         # filename but has different playback bytes. Only trust an existing
         # matching note which records both hashes explicitly.
-        note_dir = vault / "Voice Archive/Notes"
-        if len(candidates) == 1 and note_dir.is_dir():
-            for proof in note_dir.glob("*.md"):
+        if len(candidates) == 1:
+            for proof in recording_notes(vault):
                 fields, _ = parse_note(proof.read_text("utf-8"))
                 if (fields.get("source_sha256") == digest and
                     fields.get("voice_audio") == candidates[0].relative_to(vault).as_posix() and
@@ -469,7 +481,7 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
     # Preserve Apple identity when uniquely attested by a readable manifest.
     apple_id = archived_uuid(digest, source, manifest_db)
     prior_note = matching_note(vault, digest, apple_id)
-    identity = (prior_note.stem if prior_note else apple_id or f"audio-{digest}")
+    identity = (parse_note(prior_note.read_text("utf-8"))[0]["recording_id"] if prior_note else apple_id or f"audio-{digest}")
     inside = source_in_vault(source, vault)
     existing = find_managed_audio(vault, digest)
     if existing is None and prior_note is not None:
@@ -487,9 +499,11 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
     extension = ".m4a" if convert else source.suffix.lower()
     audio_rel = (existing.relative_to(vault).as_posix() if existing else
                  inside if inside is not None else f"Voice Archive/Audio/sha256-{digest}{extension}")
-    note_rel = f"Voice Archive/Notes/{identity}.md"
+    note_rel = (prior_note.relative_to(vault).as_posix() if prior_note else f"Voice Archive/{identity}.md")
     sync_rel = f"Voice Archive/Sync/{identity}.sync.json"
     note = vault / note_rel
+    if prior_note is None and note.exists():
+        raise ValueError(f"Destination note already exists but does not match recording identity: {note}")
     asset = vault / audio_rel
     step(3, 6, "Plan the iCloud listening copy and clean Markdown")
     print(f"  Source: {source}")
@@ -681,9 +695,8 @@ def process_one(note: Path, vault: Path, model_python: Path, model: str,
 
 def process_pending(vault: Path, model_python: Path, model: str, limit: int,
                     whisper_root: Path = WHISPER, manifest_db: Path = BACKUP_DB) -> None:
-    root = vault / "Voice Archive/Notes"
-    if not root.is_dir():
-        print("No imported recordings pending; notes folder does not exist.")
+    if not (vault / "Voice Archive").is_dir():
+        print("No imported recordings pending; Voice Archive does not exist.")
         return
     # Cached transcription reuse works even when MLX is not installed.
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -694,7 +707,7 @@ def process_pending(vault: Path, model_python: Path, model: str, limit: int,
             print("Another local transcription worker is running; avoiding overlap.")
             return
         candidates = []
-        for note in sorted(root.glob("*.md")):
+        for note in recording_notes(vault):
             fields, _ = parse_note(note.read_text("utf-8"))
             if fields.get("transcription_status") == "pending":
                 candidates.append(note)
@@ -732,12 +745,12 @@ def import_legacy(vault: Path, source_type: str, stem: str | None, pilot_first: 
     digest = digest_file(audio)
     archive_identity = f"vm-{apple_uuid}" if apple_uuid else f"jpr-{digest[:24]}"
     prior_note = matching_note(vault, digest, archive_identity)
-    identity = prior_note.stem if prior_note else archive_identity
+    identity = (parse_note(prior_note.read_text("utf-8"))[0]["recording_id"] if prior_note else archive_identity)
     blocks = make_blocks(data, identity)
     step(3, 5, "Plan archival recording note and managed listening asset")
     # Keep previous pilot paths and stable logical IDs; audio de-duplicate when possible.
     existing = find_managed_audio(vault, digest)
-    previous_note = vault / f"Voice Archive/Notes/{identity}.md"
+    previous_note = prior_note if prior_note is not None else vault / f"Voice Archive/{identity}.md"
     # Version 1.0 stored Apple UUID-named assets. Reuse those exact verified
     # originals rather than create an orphaned second listening copy.
     if not existing and previous_note.is_file():
@@ -750,12 +763,14 @@ def import_legacy(vault: Path, source_type: str, stem: str | None, pilot_first: 
     playback_ext = ".m4a" if audio.suffix.lower() not in IOS_PLAYABLE else audio.suffix.lower()
     audio_rel = (existing.relative_to(vault).as_posix() if existing else
                  f"Voice Archive/Audio/sha256-{digest}{playback_ext}")
-    note_rel = f"Voice Archive/Notes/{identity}.md"
+    note_rel = (prior_note.relative_to(vault).as_posix() if prior_note else f"Voice Archive/{identity}.md")
     sync_rel = f"Voice Archive/Sync/{identity}.sync.json"
     if prior_note is not None:
         saved_fields, _ = parse_note(prior_note.read_text("utf-8"))
         audio_rel = saved_fields["voice_audio"]
         sync_rel = saved_fields["voice_sync"]
+    if prior_note is None and (vault / note_rel).exists():
+        raise ValueError(f"Destination note already exists with an unrelated identity: {note_rel}")
     for rel in [audio_rel, sync_rel, note_rel]:
         print(f"  {'KEEP' if (vault / rel).is_file() else 'CREATE'} {vault / rel}")
     if not apply:
@@ -894,7 +909,7 @@ def main() -> None:
                 process_pending(vault, model_python, args.model, args.limit,
                                 args.whisper_root.expanduser(), args.manifest_db.expanduser())
             else:
-                candidates = list((vault / "Voice Archive/Notes").glob("*.md"))
+                candidates = recording_notes(vault)
                 pending = sum(parse_note(n.read_text("utf-8"))[0].get("transcription_status") == "pending"
                               for n in candidates)
                 step(1, 1, f"DRY RUN: {pending} pending notes, no transcription launched")
