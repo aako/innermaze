@@ -62,6 +62,11 @@ async function check(){
   assert.equal(spawned.argv[0],fs.realpathSync(helper));
   assert.equal(spawned.argv.at(-1),'--apply');
   assert.equal(spawned.opts.shell,false);
+  // The GUI process may inherit only /usr/bin:/bin: Python must still find ffprobe.
+  for (const bin of ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin'])
+    assert(spawned.opts.env.PATH.split(':').includes(bin), 'Missing media tool path: ' + bin);
+  assert.equal(spawned.opts.env.PATH.endsWith((require('node:process').env.PATH ||
+    '/usr/bin:/bin:/usr/sbin:/sbin')),true);
   assert.equal(spawned.argv.includes('--source-filename'),true);
   electronNative = '';
   const payload = Buffer.from('synthetic-staged-audio');

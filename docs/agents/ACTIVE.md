@@ -30,3 +30,10 @@
 4. **A / B / C / D:** read this file and the current active code before editing; return code/tests/short check-in for E's integration.
 
 **No real import, model run, or iPhone acceptance has been claimed at creation of this file.**
+
+## Live Cabinet checkpoint — 2026-10-27
+
+- Cabinet plugin deployed from active candidate; original Dropbox Voice Memo source SHA `dd31001ec7b357939a0ed1143251f1acec440777a55e57fc9dd821a5dae2e50c` verified unchanged **before the first GUI attempt**.
+- First real GUI import (`Later` transcription, `Skip` Qwen) reached Python identity inspection but failed before import: Obsidian child process did not inherit Homebrew/MacPorts PATH, so `ffprobe` could not be located (`FileNotFoundError`). No audio import or model run confirmed.
+- Agent E fixed only the desktop child-process PATH and added a targeted launcher regression; original source files and independent archiver remain untouched.
+- Next: reinstall updated `main.js` directly into Cabinet; reload plugin; retry exact same original via UI; confirm playable note, dedup, original source SHA, then targeted Whisper and Qwen. No BRAT or synthetic-vault test.

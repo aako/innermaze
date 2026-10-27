@@ -1226,9 +1226,15 @@ async function innermazeMangoRun(plugin, args, progress) {
   if (!vault || !fs.existsSync(path.join(vault, '.obsidian')))
     throw new Error('Open an existing local filesystem Obsidian vault on Mango.');
   const argv = [helper, '--vault', vault, ...args, '--apply'];
+  // Finder/LaunchServices starts Obsidian with a smaller PATH than Terminal.
+  // Pass known macOS package-manager tool directories to this child only.
+  // No shell interpolation; the audio archive remains input-only.
+  const childEnv = {...require('node:process').env};
+  childEnv.PATH = ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin',
+                   childEnv.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
   let stdout = '', stderr = '';
   await new Promise((resolve, reject) => {
-    const process = spawn('/usr/bin/python3', argv, {shell:false, stdio:['ignore','pipe','pipe']});
+    const process = spawn('/usr/bin/python3', argv, {shell:false, env:childEnv, stdio:['ignore','pipe','pipe']});
     process.stdout.on('data', chunk => {
       stdout = (stdout + String(chunk)).slice(-30000);
       const matches = String(chunk).match(/\]\s+(\d+)\/(?:5|3)\s+\|\s+([^\r\n]*)/g);
