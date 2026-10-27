@@ -1,7 +1,7 @@
 // Offline regression tests: both M4A assembly strategies and original/condensed mapping.
 const Module=require('module'); const load=Module._load;
 Module._load=(name,parent,main)=>name==='obsidian'?
-  {Plugin:class{},PluginSettingTab:class{},Setting:class{},ItemView:class{},Notice:class{},TFile:class{},Modal:class{},MarkdownView:class{},Platform:{isMobile:false}}:
+  {Plugin:class{},PluginSettingTab:class{},Setting:class{},ItemView:class{},FileView:class{},Notice:class{},TFile:class{},Modal:class{},MarkdownView:class{},Platform:{isMobile:false}}:
   load(name,parent,main);
 process.env.INNERMAZE_TEST='1';
 const {strict:assert}=require('node:assert');

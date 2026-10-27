@@ -6,7 +6,7 @@ class TFile {constructor(path){this.path=path;this.refresh();}refresh(){this.nam
 class Plugin {}
 class ItemView {constructor(leaf){this.leaf=leaf;}}
 class Modal {}
-Module._load=(name,parent,isMain)=>name==='obsidian'?{Plugin,ItemView,Modal,PluginSettingTab:class{},Setting:class{},Notice:class{},TFile,MarkdownView:class{},Platform:{isMobile:false}}:original(name,parent,isMain);
+Module._load=(name,parent,isMain)=>name==='obsidian'?{Plugin,ItemView,FileView:ItemView,Modal,PluginSettingTab:class{},Setting:class{},Notice:class{},TFile,MarkdownView:class{},Platform:{isMobile:false}}:original(name,parent,isMain);
 process.env.INNERMAZE_TEST='1';
 const Innermaze=require('../main.js');
 const {validatedRecordingTitle}=Innermaze._internals;

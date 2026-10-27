@@ -1,3 +1,11 @@
+## Release 0.1.8: recording note is the player tab
+
+- Innermaze now uses Obsidian `FileView` in the SAME `WorkspaceLeaf` as the opened Markdown recording. No second “Innermaze” tab. Old fileless 0.1.7 player tabs are detached on layout restore (only when state has no file), without touching Markdown tabs. FileView owns the note path, so tab title, file-open navigation and workspace active file resolve to the recording note.
+- Edit transcript switches that same leaf back to native Markdown/source mode. The explicit "Open player for current voice recording" command switches back. Opening another recording uses its own tab as usual; no globally reused utility player.
+- When a non-recording Markdown note opens in an Innermaze file leaf, it reverts to native Markdown view. A brief intentional suppression avoids immediately bouncing back to the player when Edit transcript is pressed.
+- Deferred view hydration retained; 0.1.7 lossless edit-list playback, hidden packet fallback, timed highlights, and renamed notes unchanged. No iCloud vault file changes, scheduled worker changes, or source-audio writes.
+- Real Obsidian macOS/iOS behavior must be tested after BRAT install; mock tests are not device acceptance.
+
 ## Release 0.1.7: recording titles and root-level notes
 
 New recording notes live directly in `Voice Archive/`. The opt-in Obsidian command "Move recording notes into Voice Archive root" migrates verified legacy `Voice Archive/Notes/*.md` through Obsidian fileManager; never overwrites collisions. The player Rename action synchronizes Markdown filename and `display_title`, preserving `recording_id`, `voice_sync`, audio, original source titles, transcript and resume position. Mango importer scans root and legacy notes by immutable `recording_id` + SHA and reuses renamed notes. No worker activation.

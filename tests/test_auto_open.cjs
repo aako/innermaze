@@ -1,137 +1,116 @@
-// Regressions for actual Obsidian player-tab and file-open lifecycle.
+// 0.1.8: the recording's own Markdown leaf becomes a FileView, no player tab.
 'use strict';
-const assert = require('node:assert/strict');
-const Module = require('module');
-const originalLoad = Module._load;
+const assert=require('node:assert/strict');
+const Module=require('node:module'); const nativeLoad=Module._load;
 class TFile {
-  constructor(path) { this.path=path; this.name=path.split('/').at(-1); this.extension=this.name.split('.').at(-1); }
+ constructor(path){this.path=path;this.name=path.split('/').at(-1);this.basename=this.name.replace(/\.md$/,'');this.extension=this.name.split('.').at(-1);}
 }
-class Plugin {}
-class ItemView { constructor(leaf){this.leaf=leaf;} }
-class PluginSettingTab { constructor(app,plugin){this.app=app;this.plugin=plugin;} }
+class ItemView {constructor(leaf){this.leaf=leaf;this.app=leaf.workspace.app;}}
+class FileView extends ItemView {}
+class MarkdownView extends FileView {}
+class Plugin {};
 const notices=[];
-const ob={ Plugin, PluginSettingTab, Setting:class{}, ItemView, Modal:class{},
-  Notice:class { constructor(message){notices.push(message);} }, TFile, MarkdownView:class{}, Platform:{isMobile:false} };
-Module._load=(name,parent,isMain)=>name==='obsidian'?ob:originalLoad(name,parent,isMain);
+const ob={Plugin,FileView,ItemView,MarkdownView,Modal:class{},Setting:class{},PluginSettingTab:class{},
+  Notice:class{constructor(x){notices.push(x)}},TFile,Platform:{isMobile:false}};
+Module._load=(name,parent,main)=>name==='obsidian'?ob:nativeLoad(name,parent,main);
 process.env.INNERMAZE_TEST='1';
-const InnermazePlugin=require('../main.js');
-const {isRecordingNote}=InnermazePlugin._internals;
-const noteText=id=>`---\nvoice_archive: true\nrecording_id: "${id}"\nvoice_audio: "Voice Archive/Audio/a.m4a"\nvoice_sync: "Voice Archive/Sync/${id}.sync.json"\n---\n\nHello.\n`;
-const filename=id=>`Voice Archive/Notes/${id}.md`;
-async function scenario(){
-  const fileA=new TFile(filename('audio-one'));
-  const fileB=new TFile(filename('audio-two'));
-  const unrelated=new TFile('Other/Task.md');
-  const fake=new TFile(filename('not-a-recording'));
-  const moved=new TFile('Other/Moved-Recording.md');
-  const notes=new Map([[fileA.path,noteText('audio-one')],[fileB.path,noteText('audio-two')],
-    [unrelated.path,'# Tasks\n'],[fake.path,'# Not Innermaze\n'],[moved.path,noteText('moved')]]);
-  let fileHandler=null,startup=null,active=fileA,created=0,revealed=0,tabState={type:'empty'};
-  const history=[];
-  // A real plugin view instance must be constructed by the registered factory.
-  let playerFactory=null;
-  const leaf={view:{},isDeferred:false,getViewState(){return tabState;},async setViewState(next){
-    tabState=next;
-    // Real Obsidian sends file-open(null) when a non-Markdown view takes focus.
-    active=null;
-    fileHandler(null);
-    await Promise.resolve();
-    this.view=playerFactory(this);
-    this.view.notePath='';
-    this.view.setRecordingPath=async function(path){this.notePath=path;history.push(path);};
-  }};
-  const workspace={
-    getActiveFile:()=>active,
-    getLeavesOfType:type=>type==='innermaze-player'&&tabState.type===type?[leaf]:[],
-    getLeaf:mode=>{assert.equal(mode,'tab');created++;return leaf;},
-    getRightLeaf:()=>{throw Error('Do not open sidebar; working player uses tab');},
-    async revealLeaf(pane){assert.equal(pane,leaf);revealed++;active=null;fileHandler(null);},
-    on(event,callback){assert.equal(event,'file-open');fileHandler=callback;return {};},
-    onLayoutReady(cb){startup=cb;},
-  };
-  const plugin=new InnermazePlugin();const cmds={};
-  plugin.app={workspace,
-    vault:{cachedRead:async file=>notes.get(file.path),getAbstractFileByPath:path=>[fileA,fileB,unrelated,fake,moved].find(f=>f.path===path)||null,on:()=>({})},
-    metadataCache:{getFileCache:file=>({frontmatter:file===moved?{voice_archive:true}:{}})}};
-  plugin.loadData=async()=>({positions:{}});
-  plugin.saveData=async()=>{};
-  plugin.registerView=(type,factory)=>{assert.equal(type,'innermaze-player');playerFactory=factory;};plugin.addSettingTab=()=>{};plugin.registerEvent=()=>{};
-  plugin.addCommand=cmd=>{cmds[cmd.id]=cmd.callback;};
-  await plugin.onload();
-  assert.equal(isRecordingNote(fileA,notes.get(fileA.path)),true);
-  assert.equal(isRecordingNote(unrelated,notes.get(unrelated.path)),false);
-  assert.equal(isRecordingNote(fake,notes.get(fake.path)),false);
-  // Startup must survive the null event emitted DURING player initialization.
-  startup();await plugin.autoOpenTask;
-  assert.deepEqual(history,[fileA.path]);assert.equal(created,1);assert.equal(revealed,1);
-  assert.equal(plugin.lastRecordingPath,fileA.path);
-  // Manual Cmd-P command must work while the PLAYER tab, not Markdown, has focus.
-  assert.equal(active,null);
-  await cmds['open-innermaze-player']();
-  assert.deepEqual(history,[fileA.path,fileA.path]);assert.equal(created,1);
-  assert.deepEqual(notices,[]);
-  // A second recording reuses the tab and does not treat own null event as navigation.
-  active=fileB;fileHandler(fileB);await plugin.autoOpenTask;
-  assert.equal(history.at(-1),fileB.path);assert.equal(created,1);
-  // Ordinary notes and fake archive notes are ignored.
-  active=unrelated;fileHandler(unrelated);await plugin.autoOpenTask;
-  active=fake;fileHandler(fake);await plugin.autoOpenTask;
-  assert.equal(history.length,3);
-  // A recording moved outside archive folder still opens using verified frontmatter.
-  active=moved;fileHandler(moved);await plugin.autoOpenTask;
-  assert.equal(history.at(-1),moved.path);
-  // Rapid true navigation: the most recent real recording should win.
-  active=fileA;fileHandler(fileA);active=fileB;fileHandler(fileB);await plugin.autoOpenTask;
-  assert.equal(history.at(-1),fileB.path);assert.equal(created,1);
-  // Mobile uses exactly the same normal tab.
-  ob.Platform.isMobile=true;
-  active=fileA;fileHandler(fileA);await plugin.autoOpenTask;
-  assert.equal(history.at(-1),fileA.path);
-  ob.Platform.isMobile=false;
-  plugin.data.autoOpenPlayer=false;
-  const count=history.length;active=fileB;fileHandler(fileB);await plugin.autoOpenTask;
-  assert.equal(history.length,count);
-  // Even with auto-open off, explicit command remains functional.
-  await cmds['open-innermaze-player']();
-  assert.equal(history.at(-1),fileB.path);
-  // Regression: Obsidian 1.7.2+ restores a background custom tab as
-  // DeferredView. getViewState().type is correct, but view methods DO NOT EXIST.
-  // Production 0.1.3 failed before revealLeaf(), producing the user's report.
-  plugin.data.autoOpenPlayer=true;
-  let forcedLoads=0;
-  leaf.view={ getViewType:()=> 'innermaze-player' };
-  leaf.isDeferred=true;
-  leaf.loadIfDeferred=async function(){
-    forcedLoads++;
-    this.isDeferred=false;
-    this.view=playerFactory(this);
-    this.view.notePath='';
-    this.view.setRecordingPath=async function(path){this.notePath=path;history.push(path);};
-  };
-  active=fileA;
-  await cmds['open-innermaze-player']();
-  assert.equal(forcedLoads,1,'deferred view must be hydrated before player access');
-  assert.equal(history.at(-1),fileA.path);
-  assert.equal(notices.length,0,'deferred tab must not throw on manual open');
-  assert.equal(plugin.lastRecordingPath,fileA.path);
-  // Auto-open must also reuse and hydrate the deferred view while retaining
-  // the null-file event resilience. Test again with a fresh placeholder.
-  leaf.view={getViewType:()=> 'innermaze-player'};
-  leaf.isDeferred=true;
-  active=fileB;fileHandler(fileB);await plugin.autoOpenTask;
-  assert.equal(forcedLoads,2);
-  assert.equal(history.at(-1),fileB.path);
-  // Official Obsidian docs: revealLeaf() itself normally hydrates a view.
-  // That variant must work without unnecessary forced loading.
-  const oldReveal=workspace.revealLeaf;
-  leaf.view={getViewType:()=> 'innermaze-player'};
-  leaf.isDeferred=true;
-  workspace.revealLeaf=async pane=>{await pane.loadIfDeferred();await oldReveal(pane);};
-  active=fileA;fileHandler(fileA);await plugin.autoOpenTask;
-  assert.equal(forcedLoads,3);
-  assert.equal(history.at(-1),fileA.path);
-  assert.equal(notices.length,0);
-  console.log('PASS: DeferredView hydration on manual and auto-open, both reveal and fallback paths');
-  console.log('PASS: real tab lifecycle, null-file events, manual command, reuse, mobile, navigation and off switch');
+const InnermazePlugin=require('../main');
+const {InnermazeView,isRecordingNote}=InnermazePlugin._internals;
+function source(id){return `---\nvoice_archive: true\nrecording_id: "${id}"\nvoice_audio: "Voice Archive/Audio/a.m4a"\nvoice_sync: "Voice Archive/Sync/${id}.sync.json"\n---\n\nHello.`}
+const noteA=new TFile('Voice Archive/Dream - Chris Wiley sushi restaurant.md');
+const noteB=new TFile('Voice Archive/Another Dream.md');
+const ordinary=new TFile('Clippings/Article.md');
+const other=new TFile('Voice Archive/Not a recording.md');
+const outside=new TFile('Elsewhere/Moved recording.md');
+const sources=new Map([[noteA.path,source('a')],[noteB.path,source('b')],[ordinary.path,'# Plain article'],[other.path,'# Not a recording'],[outside.path,source('else')]]);
+let fileOpen=null, startup=null, playerFactory=null, createdTabs=0, revealed=0, activeLeaf=null;
+const playerPaths=[], changedStates=[], loads=[], leaves=[];
+const workspace={
+  app:null,activeLeaf:null,
+  getActiveFile(){return this.activeLeaf?.view?.file||null;},
+  getLeavesOfType(type){return leaves.filter(l=>l.getViewState().type===type);},
+  getLeaf(mode){if(mode==='tab'){createdTabs++;throw Error('Plugin must never create a second tab');}throw Error('Unexpected getLeaf '+mode);},
+  async revealLeaf(l){assert(leaves.includes(l));revealed++;this.activeLeaf=l;},
+  on(event,cb){assert.equal(event,'file-open');fileOpen=cb;return{};},
+  onLayoutReady(cb){startup=cb;},
+};
+const app={workspace,
+  vault:{cachedRead:async file=>sources.get(file.path),getAbstractFileByPath:path=>[noteA,noteB,ordinary,other,outside].find(f=>f.path===path)||null,on:()=>({})},
+  metadataCache:{getFileCache:file=>({frontmatter:{voice_archive:file===outside}})}};
+workspace.app=app;
+function makeLeaf(file){
+ const leaf={workspace,view:{file},isDeferred:false,state:{type:'markdown',state:{file:file.path}},
+   getViewState(){return this.state;},
+   async setViewState(next){
+     changedStates.push({leaf:this,state:next});
+     const current=next.state?.file ? app.vault.getAbstractFileByPath(next.state.file):null;
+     this.state=next;
+     if(next.type==='markdown'){
+       this.view={file:current};fileOpen(current);
+     }else if(next.type==='innermaze-player'){
+       this.view=playerFactory(this);
+       this.view.file=current;
+       this.view.setRecordingPath=async function(path){this.notePath=path;playerPaths.push({leaf,path});};
+       // A FileView owns a real TFile, so switching views can generate a real
+       // file-open event. It must not cancel its own initialization.
+       fileOpen(current);
+       await this.view.onLoadFile(current);
+     }else throw Error('Unexpected type');
+   },
+   async loadIfDeferred(){loads.push(this);this.isDeferred=false;this.view=playerFactory(this);this.view.file=app.vault.getAbstractFileByPath(this.state.state.file);this.view.setRecordingPath=async function(path){this.notePath=path;playerPaths.push({leaf,path});};await this.view.onLoadFile(this.view.file);}
+ };leaves.push(leaf);return leaf;
 }
-scenario().catch(err=>{console.error(err);process.exitCode=1;});
+function navigate(leaf,file){leaf.state={type:'markdown',state:{file:file.path}};leaf.view={file};workspace.activeLeaf=leaf;fileOpen(file);}
+async function scenario(){
+ const plugin=new InnermazePlugin();plugin.app=app;
+ const commands={};plugin.loadData=async()=>({positions:{}});plugin.saveData=async()=>{};
+ plugin.registerView=(type,fn)=>{assert.equal(type,'innermaze-player');playerFactory=fn;};
+ plugin.addSettingTab=()=>{};plugin.registerEvent=()=>{};
+ plugin.addCommand=x=>{commands[x.id]=x.callback;};
+ await plugin.onload();
+ assert(isRecordingNote(noteA,sources.get(noteA.path)));
+ const l1=makeLeaf(noteA);workspace.activeLeaf=l1;
+ const oldTab={state:{type:'innermaze-player',state:{}},view:{},detached:false,
+   getViewState(){return this.state;},detach(){this.detached=true;leaves.splice(leaves.indexOf(this),1);}};
+ leaves.push(oldTab);
+ startup();await plugin.autoOpenTask;
+ assert(oldTab.detached,'legacy fileless utility tab is cleaned up on startup');
+ assert.equal(createdTabs,0);assert.equal(l1.state.type,'innermaze-player');
+ assert.equal(l1.state.state.file,noteA.path);
+ assert(l1.view instanceof FileView);assert(l1.view instanceof InnermazeView);
+ assert.equal(l1.view.getDisplayText(),noteA.basename);
+ assert.equal(workspace.getActiveFile(),noteA);
+ assert.deepEqual(playerPaths.map(x=>x.path),[noteA.path]);
+ const version=plugin.autoOpenRequest;
+ fileOpen(noteA);await plugin.autoOpenTask;assert.equal(plugin.autoOpenRequest,version,'FileView event must not recursively open');
+ // Edit should stay in SAME leaf, and keep native Markdown visible despite file-open.
+ await l1.view.editTranscript();await plugin.autoOpenTask;
+ assert.equal(l1.state.type,'markdown');assert.equal(l1.state.state.file,noteA.path);assert.equal(createdTabs,0);
+ fileOpen(noteA);await plugin.autoOpenTask;assert.equal(l1.state.type,'markdown','editing remains possible');
+ // Explicit command toggles the same file into player mode.
+ await commands['open-innermaze-player']();
+ assert.equal(l1.state.type,'innermaze-player');assert.equal(createdTabs,0);
+ // Opening another note navigates in the same leaf; editing suppression expires.
+ navigate(l1,noteB);await plugin.autoOpenTask;assert.equal(l1.view.notePath,noteB.path);
+ // Different tabs keep DIFFERENT recording contexts. No global player leaf reuse.
+ const l2=makeLeaf(noteA);workspace.activeLeaf=l2;fileOpen(noteA);await plugin.autoOpenTask;
+ assert.equal(l2.view.notePath,noteA.path);assert.equal(l1.view.notePath,noteB.path);
+ // Ordinary markdown never becomes player.
+ navigate(l2,ordinary);await plugin.autoOpenTask;assert.equal(l2.state.type,'markdown');
+ navigate(l2,other);await plugin.autoOpenTask;assert.equal(l2.state.type,'markdown');
+ navigate(l2,outside);await plugin.autoOpenTask;assert.equal(l2.view.notePath,outside.path);
+ // Native navigation within a FileView to an ordinary note switches to Markdown.
+ await l2.view.onLoadFile(ordinary);await plugin.autoOpenTask;
+ assert.equal(l2.state.type,'markdown');assert.equal(l2.state.state.file,ordinary.path);
+ // Mobile goes through identical path.
+ ob.Platform.isMobile=true;navigate(l2,noteA);await plugin.autoOpenTask;
+ assert.equal(l2.view.notePath,noteA.path);ob.Platform.isMobile=false;
+ // Restored DeferredView gets hydrated without a new tab.
+ l2.view={file:noteA};l2.isDeferred=true;
+ await commands['open-innermaze-player']();
+ assert.equal(loads.length,1);assert.equal(l2.view.notePath,noteA.path);
+ assert.equal(createdTabs,0);
+ assert.equal(notices.length,0);
+ console.log('PASS: same file tab, file title and active file, native editor toggle, manual switch, mobile, multiple tabs, ordinary Markdown and DeferredView');
+}
+scenario().catch(e=>{console.error(e);process.exitCode=1;});

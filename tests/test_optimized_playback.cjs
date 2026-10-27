@@ -6,7 +6,7 @@ const originalLoad=Module._load;
 class TFile { constructor(path,size) { this.path=path; this.stat={size}; } }
 class ItemView { constructor(leaf) { this.leaf=leaf; } }
 Module._load=(name,parent,main)=>name==='obsidian'?{
- Plugin:class{},PluginSettingTab:class{},Setting:class{},ItemView,
+ Plugin:class{},PluginSettingTab:class{},Setting:class{},ItemView,FileView:ItemView,
  Notice:class{},TFile,Modal:class{},MarkdownView:class{},Platform:{isMobile:true}
 }:originalLoad(name,parent,main);
 process.env.INNERMAZE_TEST='1';

@@ -128,3 +128,7 @@ and seeking, resume position, AirPods and locked-screen playback.
 - Use **Rename** in the player to set both the human-readable player heading and the Markdown note filename, for example `Dream - Chris Wiley sushi restaurant`. The immutable `recording_id`, `source_title`, and timing sidecar are unchanged.
 - The Mango importer finds already-renamed recordings by frontmatter `recording_id` and audio SHA-256, not filename.
 - **Skip long pauses** continues to use the current lossless edit-list engine with the hidden packet fallback.
+
+## 0.1.8: Same-tab recording player
+
+Opening a recording shows Innermaze in its original note tab. “Edit transcript” switches that same tab to Markdown; run “Innermaze: Open player for current voice recording” to switch it back. No new player tab is created.
