@@ -75,3 +75,30 @@ Actual Obsidian desktop, MLX Whisper and Qwen invocation, native file-picker per
 ## Flight Recorder
 
 Check `codex-audit history`, `codex-audit show --last`, and `codex-audit undo --last`; use `~/.codex/bin/codex-audit protect --output <path> -- <command>` when overwriting a protected output is necessary. These do not imply unlimited rollback of arbitrary writes.
+
+## Mango validation and publication record
+
+- **Hardening implementation commit:** `12bcbe1b06217e1bbd2b8824d5622b4e56d0502f`
+- **Tests actually executed on Mango:** 15 commands, all passed.
+- **Test transcript:** local diagnostics backup `validation.log` (not committed).
+- **Actual Obsidian desktop GUI:** NOT YET TESTED; requires throwaway-vault pilot.
+- **Real MLX/Qwen:** NOT YET TESTED as part of the synthetic test suite.
+- **Live Cabinet / iOS / BRAT:** NOT TESTED OR MODIFIED.
+
+### Commands
+
+- PASS: `node --check main.js`
+- PASS: `node --check tools/apple_voice_memo_uuid.cjs`
+- PASS: `node tests/test_alignment.cjs`
+- PASS: `node tests/test_auto_open.cjs`
+- PASS: `node tests/test_navigation_guard.cjs`
+- PASS: `node tests/test_recording_rename.cjs`
+- PASS: `node tests/test_lossless_ab.cjs`
+- PASS: `node tests/test_optimized_playback.cjs`
+- PASS: `node tests/test_apple_voice_memo_uuid.cjs`
+- PASS: `python3 -m unittest discover -s tests -p test_importer.py` (16 tests)
+- PASS: `python3 -m unittest discover -s tests -p test_recording_identity.py` (11 tests)
+- PASS: `python3 -m unittest discover -s tests -p test_classification.py` (9 tests)
+- PASS: `python3 -m unittest discover -s tests -p test_integration_agent_e.py` (12 tests)
+- PASS: `node tests/test_pilot_hardening.cjs`
+- PASS: `python3 -m unittest discover -s tests -p test_pilot_hardening.py` (7 tests)
