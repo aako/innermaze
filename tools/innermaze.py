@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # filename: innermaze.py
-# version: 0.1.4
+# version: 0.1.5
 # timestamp: 2026-10-26 14:34:00
 """Innermaze Mango-local audio importer and transcription worker; Obsidian plugin installed via BRAT.
 
@@ -459,7 +459,8 @@ def find_managed_audio(vault: Path, digest: str) -> Path | None:
 def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
                model_python: Path, model: str, whisper_root: Path = WHISPER,
                manifest_db: Path = BACKUP_DB, *, identity_hint: str | None = None,
-               reuse_cached: bool = True, source_kind: str = 'arbitrary-file') -> Path | None:
+               reuse_cached: bool = True, source_kind: str = 'arbitrary-file',
+               source_title: str | None = None) -> Path | None:
     step(1, 6, "Validate the arbitrary audio source and destination vault")
     source = source.expanduser().absolute()
     if not source.is_file():
@@ -540,7 +541,8 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
         raise ValueError("No vault audio is available")
     step(5, 6, "Create or preserve editable note and external timestamp link")
     playback_digest = digest_file(asset)
-    raw_note = make_arbitrary_note(identity, source.name, audio_rel, sync_rel, digest, playback_digest, source_kind=source_kind)
+    raw_note = make_arbitrary_note(identity, source_title or source.name, audio_rel, sync_rel,
+                                   digest, playback_digest, source_kind=source_kind)
     atomic_create(note, raw_note.encode("utf-8"), TEMP_DIR)
     step(6, 6, "Imported and queued: nothing changed in source or archive")
     # Existing Whisper timing is reusable even with --no-transcribe and even

@@ -45,3 +45,33 @@ Confirm working contents with Git and inspect `codex-audit history`, `codex-audi
 ## Checkpoint
 
 Objective: one safe Mango Dropbox import with optional Whisper then Qwen. Decision: separate targeted helper rather than replacing legacy importer or enabling a worker. Ruled out: C's unchanged patch, hash-only dedup, double AI stores, BRAT release. Exact action: review successful branch commit/tests, then explicitly authorize a limited device/Cabinet pilot; no main merge or release before Agent 0 review.
+
+---
+
+# Agent E — Pilot hardening status
+
+**Prepared:** 2026-10-27. **State:** isolated source candidate, not released and not approved for live Cabinet use.
+
+- **Parent integration milestone:** `526d5257ffacd7762a2fdad9d32960640a33f94f`.
+- **Candidate branch:** `integration/agent-e-pilot-hardening-v1`.
+- **Implementation commit:** recorded below after tests and first commit.
+- **Frozen player manifest:** `0.1.9`; unchanged.
+
+## Narrow changes
+
+1. Obsidian desktop UI uses the explicitly configured, realpath-resolved integration helper; no implicit fallback to unchanged `~/Code/Innermaze` main. Adds Settings text field and Node checks of spawn argv, actual selected file path, staged bytes and name.
+2. Reused recordings must have a readable, in-vault playback attachment whose actual full-file SHA-256 equals the saved `playback_sha256`; otherwise a `blocked` result is returned without alias, note, transcript, or audio mutations.
+3. Original Finder picker basename travels as a validated `--source-filename` CLI argument into `source_title` and display title. Staged copies advertise `--staged-input`, retaining `arbitrary-file` rather than falsely asserting Dropbox provenance. Native files within known archive roots keep their source classification.
+4. A previously `ready` transcript may be classified with `transcribe=later,classify=after` without Whisper. Classification remains an optional, append-only `Voice Archive/Classification/<sha256(recording_id)>/runs` output, never human-approved metadata.
+5. Corrected an earlier integration test that simulated `transcribe_one() -> ready` without making the note's real transcript status ready; Qwen now gates on **actual** note status.
+6. Synthetic throwaway-vault preparer and detailed on-device pilot procedure provided. No automatic model call, worker activation or live Cabinet mutation.
+
+## Gates and remaining risks
+
+Publisher reruns 13 preexisting test commands plus `node tests/test_pilot_hardening.cjs` and `python3 -m unittest discover -s tests -p test_pilot_hardening.py`. Test run results and commit SHA are appended only after passing on Mango.
+
+Actual Obsidian desktop, MLX Whisper and Qwen invocation, native file-picker permissions, iCloud placeholders and player audio output **remain unverified** until the explicit controlled pilot is completed. No iOS UUID parser bundling, durable job queue, BRAT update, helper install or `main` merge in this branch.
+
+## Flight Recorder
+
+Check `codex-audit history`, `codex-audit show --last`, and `codex-audit undo --last`; use `~/.codex/bin/codex-audit protect --output <path> -- <command>` when overwriting a protected output is necessary. These do not imply unlimited rollback of arbitrary writes.

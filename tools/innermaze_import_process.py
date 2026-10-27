@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # filename: innermaze_import_process.py
-# version: 0.1.1
+# version: 0.1.2
 # timestamp: 2026-10-27 11:20:00
 """One-recording Mango importer: reconcile first, then optional Whisper and Qwen.
 
@@ -42,6 +42,42 @@ def checked_note(vault: Path, rel: Path) -> Path:
     if path not in {p.resolve() for p in innermaze.recording_notes(vault)}:
         raise ValueError('Not a verified Voice Archive recording note')
     return path
+
+
+def playback_state(note: Path, vault: Path) -> str | None:
+    """Never call a UUID/source-SHA match playable without its verified attachment.
+
+    A missing/undownloaded iCloud attachment is unavailable, not permission to
+    replace a user's note, change its Apple alias, or recreate playback audio.
+    """
+    fields, _ = innermaze.parse_note(note.read_text('utf-8'))
+    relative = fields.get('voice_audio', '')
+    digest = fields.get('playback_sha256', '')
+    if not relative or not HEX.fullmatch(digest.lower()):
+        return 'playback_metadata_unavailable'
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or '..' in relative_path.parts:
+        return 'playback_path_invalid'
+    root = vault.resolve(strict=True)
+    asset = (root / relative_path).resolve()
+    if not asset.is_relative_to(root) or not asset.is_file():
+        return 'playback_attachment_unavailable'
+    try:
+        if innermaze.digest_file(asset).lower() != digest.lower():
+            return 'playback_hash_mismatch'
+    except OSError:
+        return 'playback_attachment_unreadable'
+    return None
+
+
+def checked_source_filename(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if (not isinstance(value, str) or not value or len(value) > 255 or
+        value in ('.', '..') or '/' in value or '\\' in value or
+        any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise ValueError('Source filename must be one safe original file basename')
+    return value
 
 
 def use_plan(plan: dict[str, Any], vault: Path) -> tuple[str, Path | None, str | None]:
@@ -118,6 +154,9 @@ def attach_uuid_alias(note: Path, alias: str) -> None:
 def transcribe_one(note: Path, vault: Path, *, model_python: Path, model: str,
                    whisper_root: Path, manifest_db: Path) -> str:
     """Targeted only; shares existing pending-worker serialization lock."""
+    current, _ = innermaze.parse_note(note.read_text('utf-8'))
+    if current.get('transcription_status') == 'ready':
+        return 'ready'
     innermaze.TEMP_DIR.mkdir(parents=True, exist_ok=True)
     with (innermaze.TEMP_DIR / 'transcription.lock').open('a+') as lock:
         try:
@@ -168,16 +207,30 @@ def classify_one(note: Path, vault: Path, *, model: str, server: str) -> dict[st
             'suggestions': parsed.get('suggestions')}
 
 
+def identity_plan_or_block(source: Path, vault: Path) -> dict[str, Any]:
+    try:
+        return identity.plan_archive_file(source, vault)
+    except ValueError as exc:
+        if str(exc).startswith('Vault audio hash contradicts note:'):
+            return {'blocked_reason': 'playback_hash_mismatch'}
+        raise
+
+
 def run_file(source: Path, vault: Path, *, transcribe: str, classify: str, apply: bool,
              model_python: Path, whisper_model: str, whisper_root: Path,
-             manifest_db: Path, qwen_model: str, server: str) -> dict[str, Any]:
+             manifest_db: Path, qwen_model: str, server: str,
+             source_filename: str | None = None, staged_input: bool = False) -> dict[str, Any]:
     meter(1, 5, 'Inspect and reconcile source, archive UUID and compressed audio')
     vault = vault.expanduser().resolve(strict=True)
     if not (vault / '.obsidian').is_dir():
         raise ValueError('Not an Obsidian vault')
-    plan = identity.plan_archive_file(source, vault)
+    plan = identity_plan_or_block(source, vault)
+    if 'blocked_reason' in plan:
+        return {'status': 'blocked', 'reason': plan['blocked_reason'], 'action': 'reuse',
+                'note': None, 'transcription': 'blocked', 'classification': 'not_run'}
     action, existing_note, uuid_alias = use_plan(plan, vault)
     candidate = plan['candidate']
+    source_filename = checked_source_filename(source_filename)
     if not HEX.fullmatch(candidate['file_sha256']):
         raise ValueError('Invalid source file hash')
     proposed = candidate['proposed_recording_id']
@@ -190,6 +243,13 @@ def run_file(source: Path, vault: Path, *, transcribe: str, classify: str, apply
         'transcription': transcribe, 'classification': classify,
         'archive_alias': uuid_alias,
     }
+    if existing_note is not None:
+        unavailable = playback_state(existing_note, vault)
+        if unavailable:
+            report.update(status='blocked', reason=unavailable, transcription='blocked',
+                          classification='not_run')
+            meter(5, 5, 'BLOCKED: saved listening attachment is unavailable; note unchanged')
+            return report
     if not apply:
         meter(5, 5, 'DRY RUN: no vault, archive or model changes')
         return report
@@ -200,22 +260,34 @@ def run_file(source: Path, vault: Path, *, transcribe: str, classify: str, apply
         except BlockingIOError:
             raise ValueError('Another Innermaze integrated import is running') from None
         # Re-evaluate after lock acquisition; another import could have completed.
-        plan = identity.plan_archive_file(source, vault)
+        plan = identity_plan_or_block(source, vault)
+        if 'blocked_reason' in plan:
+            return {'status': 'blocked', 'reason': plan['blocked_reason'], 'action': 'reuse',
+                    'note': None, 'transcription': 'blocked', 'classification': 'not_run'}
         action, existing_note, uuid_alias = use_plan(plan, vault)
+        if existing_note is not None:
+            unavailable = playback_state(existing_note, vault)
+            if unavailable:
+                report.update(status='blocked', reason=unavailable, action='reuse',
+                              transcription='blocked', classification='not_run')
+                meter(5, 5, 'BLOCKED: saved listening attachment is unavailable; note unchanged')
+                return report
         meter(3, 5, 'Reuse existing note or create one verified listening copy')
         if existing_note is not None:
             note = existing_note
             if uuid_alias:
                 attach_uuid_alias(note, uuid_alias)
         else:
-            kind = next((name for name, folder in innermaze.SOURCES.items()
-                         if source.expanduser().absolute().is_relative_to(folder.expanduser().absolute())),
-                        'arbitrary-file')
+            kind = ('arbitrary-file' if staged_input else
+                next((name for name, folder in innermaze.SOURCES.items()
+                      if source.expanduser().resolve().is_relative_to(folder.expanduser().resolve())),
+                     'arbitrary-file'))
             note = innermaze.import_any(source, vault, True, False,
                                         model_python, whisper_model, whisper_root,
                                         manifest_db, identity_hint=plan['candidate']['proposed_recording_id']
                                         if plan['candidate'].get('apple_uuid') else None,
-                                        reuse_cached=False, source_kind=kind)
+                                        reuse_cached=False, source_kind=kind,
+                                        source_title=source_filename)
             if note is None:
                 raise ValueError('Importer did not create or select a recording note')
         report['action'] = action
@@ -229,9 +301,15 @@ def run_file(source: Path, vault: Path, *, transcribe: str, classify: str, apply
         elif transcribe == 'skip':
             report['transcription'] = skip_one(note)
         else:
-            report['transcription'] = 'deferred_not_scheduled'
+            prior, _ = innermaze.parse_note(note.read_text('utf-8'))
+            report['transcription'] = ('ready_existing' if prior.get('transcription_status') == 'ready'
+                                       else 'deferred_not_scheduled')
         meter(5, 5, 'Classify only on request; preserve prior results and human edits')
-        if classify == 'after' and report['transcription'] == 'ready':
+        # Classification may run against a previously ready transcript without
+        # requesting a redundant Whisper pass (transcribe='later').
+        current_fields, _ = innermaze.parse_note(note.read_text('utf-8'))
+        transcript_ready = current_fields.get('transcription_status') == 'ready'
+        if classify == 'after' and transcript_ready:
             report['classification'] = classify_one(note, vault, model=qwen_model, server=server)
         elif classify == 'after':
             report['classification'] = 'deferred_not_scheduled_no_ready_transcript'
@@ -279,6 +357,8 @@ def main() -> None:
     parser.add_argument('--manifest-db', type=Path, default=innermaze.BACKUP_DB)
     parser.add_argument('--qwen-model', default='voice-memo-qwen')
     parser.add_argument('--server', default='http://127.0.0.1:1234/v1')
+    parser.add_argument('--source-filename', help='Original Finder/picker basename (never a source path)')
+    parser.add_argument('--staged-input', action='store_true', help='Source was staged by desktop picker; do not assert Dropbox provenance')
     parser.add_argument('--apply', action='store_true', help='Explicitly permit one selected vault import/process')
     args = parser.parse_args()
     try:
@@ -291,7 +371,8 @@ def main() -> None:
             qwen_model=args.qwen_model, server=args.server)
         if args.file:
             result = run_file(args.file.expanduser().absolute(), vault,
-                              transcribe=args.transcribe, **options)
+                              transcribe=args.transcribe, source_filename=args.source_filename,
+                              staged_input=args.staged_input, **options)
         else:
             if args.transcribe == 'skip':
                 raise ValueError('Use --file to skip transcription on import')

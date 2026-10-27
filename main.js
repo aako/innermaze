@@ -1168,6 +1168,52 @@ async function importVaultAudio(plugin, file) {
   finally { progress.close(); }
 }
 
+// Strictly configured Mango candidate helper: no fallback to working main checkout.
+function innermazeResolveMangoHelper(plugin) {
+  const fs = require('fs');
+  const path = require('path');
+  const configured = String(plugin.data?.importProcessHelperPath || '').trim();
+  if (!configured) throw new Error('Set the absolute candidate Mango helper path in Innermaze settings first.');
+  if (!path.isAbsolute(configured)) throw new Error('Mango helper path must be absolute.');
+  let resolved;
+  try { resolved = fs.realpathSync(configured); }
+  catch (_) { throw new Error('Configured Mango helper is unavailable: ' + configured); }
+  if (path.basename(resolved) !== 'innermaze_import_process.py' || !fs.statSync(resolved).isFile())
+    throw new Error('Configured path is not the integration Python helper: ' + resolved);
+  return resolved;
+}
+
+function innermazeDesktopFileArgs(source, originalName, options, staged) {
+  if (typeof originalName !== 'string' || !originalName || originalName.length > 255 ||
+      /[\\/\x00-\x1f\x7f]/.test(originalName)) throw new Error('Invalid original audio filename.');
+  return ['--file', source, '--source-filename', originalName,
+          ...(staged ? ['--staged-input'] : []), '--transcribe', options.transcribe,
+          '--classify', options.classify];
+}
+
+async function innermazeResolveDesktopSelection(selected) {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  let nativePath = '';
+  try { nativePath = require('electron').webUtils?.getPathForFile?.(selected) || ''; }
+  catch (_) { /* Electron API unavailable: bounded staging fallback. */ }
+  const source = nativePath || selected.path || '';
+  if (source && fs.existsSync(source) && fs.statSync(source).isFile())
+    return {source, staged:false, stagedDir:null};
+  if (selected.size > PICKER_MAX_BYTES)
+    throw new Error('File exceeds 200 MiB; use Mango helper CLI for this recording.');
+  const staging = path.join(os.homedir(), 'Code', '.staging', 'Innermaze');
+  fs.mkdirSync(staging, {recursive:true});
+  const stagedDir = fs.mkdtempSync(path.join(staging, 'desktop-picker-'));
+  try {
+    const ext = (selected.name.match(/\.[A-Za-z0-9]{1,8}$/)?.[0] || '.m4a').toLowerCase();
+    const saved = path.join(stagedDir, 'selected' + ext);
+    fs.writeFileSync(saved, Buffer.from(await selected.arrayBuffer()), {flag:'wx'});
+    return {source:saved, staged:true, stagedDir};
+  } catch (error) { fs.rmSync(stagedDir, {recursive:true,force:true}); throw error; }
+}
+
 // Candidate-only Mango desktop integration. Player/navigation/audio internals unchanged.
 // The Import & Process modal is separate from the existing iOS file picker.
 async function innermazeMangoRun(plugin, args, progress) {
@@ -1175,12 +1221,10 @@ async function innermazeMangoRun(plugin, args, progress) {
   const {spawn} = require('child_process');
   const fs = require('fs');
   const path = require('path');
-  const os = require('os');
-  const helper = path.join(os.homedir(), 'Code', 'Innermaze', 'tools', 'innermaze_import_process.py');
+  const helper = innermazeResolveMangoHelper(plugin);
   const vault = plugin.app.vault.adapter.getBasePath?.();
   if (!vault || !fs.existsSync(path.join(vault, '.obsidian')))
-    throw new Error('Cabinet must be open as a local filesystem vault on Mango.');
-  if (!fs.existsSync(helper)) throw new Error('The integrated Mango helper is not installed: ' + helper);
+    throw new Error('Open an existing local filesystem Obsidian vault on Mango.');
   const argv = [helper, '--vault', vault, ...args, '--apply'];
   let stdout = '', stderr = '';
   await new Promise((resolve, reject) => {
@@ -1215,31 +1259,20 @@ async function innermazeChooseDesktopFile(plugin, options) {
     const progress = new ImportProgress(plugin.app);
     progress.open();
     const fs = require('fs');
-    const path = require('path');
-    const os = require('os');
     let stagedDir = null;
     try {
       progress.step(1, 'Inspecting selected recording on Mango');
-      let nativePath = '';
-      try { nativePath = require('electron').webUtils?.getPathForFile?.(selected) || ''; }
-      catch (_) { /* Electron API unavailable: use bounded staging fallback. */ }
-      let source = nativePath || selected.path || '';
-      if (!source || !fs.existsSync(source)) {
-        // Some Electron/WebKit builds deliberately hide the original file path.
-        // A bounded copy in Mango staging preserves all source bytes/MP4 metadata.
-        if (selected.size > PICKER_MAX_BYTES)
-          throw new Error('File exceeds 200 MiB; use Mango helper CLI for this recording.');
-        const staging = path.join(os.homedir(), 'Code', '.staging', 'Innermaze');
-        fs.mkdirSync(staging, {recursive:true});
-        stagedDir = fs.mkdtempSync(path.join(staging, 'desktop-picker-'));
-        const ext = (selected.name.match(/\.[A-Za-z0-9]{1,8}$/)?.[0] || '.m4a').toLowerCase();
-        source = path.join(stagedDir, 'selected' + ext);
-        fs.writeFileSync(source, Buffer.from(await selected.arrayBuffer()), {flag:'wx'});
-      }
+      const selection = await innermazeResolveDesktopSelection(selected);
+      stagedDir = selection.stagedDir;
       progress.step(2, 'Reconciling Apple identity and existing vault notes');
       const result = await innermazeMangoRun(plugin,
-        ['--file', source, '--transcribe', options.transcribe,
-         '--classify', options.classify], progress);
+        innermazeDesktopFileArgs(selection.source, selected.name, options, selection.staged), progress);
+      if (result.status === 'blocked') {
+        progress.step(5, 'Blocked: ' + String(result.reason || 'playback unavailable'));
+        new Notice('Innermaze blocked: ' + String(result.reason || 'playback unavailable') +
+                   '; the original note and audio were not modified.', 12000);
+        return;
+      }
       progress.step(6, 'Import and selected processing complete');
       const note = result.note && plugin.app.vault.getAbstractFileByPath(result.note);
       if (note instanceof TFile) await plugin.app.workspace.getLeaf(true).openFile(note);
@@ -1297,7 +1330,7 @@ class InnermazeImportAndProcessModal extends Modal {
   }
   onOpen() {
     this.setTitle('Innermaze — Import & Process');
-    this.contentEl.createEl('p', {text:'Choose one Dropbox archive recording on Mango. The source is never modified.'});
+    this.contentEl.createEl('p', {text:'Choose one Mango recording. Known Dropbox paths retain provenance; staged copies are marked arbitrary-file.'});
     new Setting(this.contentEl).setName('Transcription')
       .setDesc('Immediate transcription runs only on Mango. Later does not schedule a worker.')
       .addDropdown(control => control
@@ -1330,6 +1363,14 @@ class InnermazeSettingsTab extends PluginSettingTab {
   constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
   display() {
     this.containerEl.empty();
+    new Setting(this.containerEl).setName('Mango integration helper path')
+      .setDesc('Absolute path to tools/innermaze_import_process.py in the isolated candidate worktree; leave blank to disable processing.')
+      .addText(field => field.setPlaceholder('/Users/.../Innermaze-worktrees/agent-e-pilot-hardening-v1/tools/innermaze_import_process.py')
+        .setValue(this.plugin.data.importProcessHelperPath || '')
+        .onChange(async value => {
+          this.plugin.data.importProcessHelperPath = value.trim();
+          await this.plugin.saveData(this.plugin.data);
+        }));
     new Setting(this.containerEl)
       .setName('Open player automatically')
       .setDesc('Show Innermaze as the recording note’s own file view; regular Markdown notes are unaffected.')
@@ -1417,7 +1458,7 @@ module.exports = class InnermazePlugin extends Plugin {
   }
 
   async onload() {
-    this.data = Object.assign({ positions: {}, skipPauses: true, autoOpenPlayer: true }, await this.loadData() || {});
+    this.data = Object.assign({ positions: {}, skipPauses: true, autoOpenPlayer: true, importProcessHelperPath: '' }, await this.loadData() || {});
     if (!this.data.positions) this.data.positions = {};
     this.autoOpenRequest = 0;
     this.lastRecordingPath = "";
@@ -1598,5 +1639,7 @@ if (typeof process !== 'undefined' && process.env && process.env.INNERMAZE_TEST 
     makeGenericNote, isAudioName, isRecordingNote, pauseSkipRanges, pauseSkipDestination,
     highlightedLineIndex, createEditListAudio, createPacketCopyAudio, makeSegments,
     originalToCompiled, compiledToOriginal, lastTimedSpeechEnd, pauseGapsWithTail,
-    InnermazeView, validatedRecordingTitle, RenameRecordingModal };
+    InnermazeView, validatedRecordingTitle, RenameRecordingModal,
+    innermazeResolveMangoHelper, innermazeMangoRun, innermazeDesktopFileArgs,
+    innermazeResolveDesktopSelection };
 }

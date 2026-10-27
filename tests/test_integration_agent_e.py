@@ -160,10 +160,13 @@ class IntegrationTests(unittest.TestCase):
     def test_classification_after_ready_and_failure_preserves_note(self):
         first = self.run_file()
         note = self.vault / first['note']
+        # A mocked return value alone isn't a ready transcript; verify the
+        # actual note state before allowing Qwen to run.
+        note.write_text(note.read_text('utf-8').replace('transcription_status: "pending"',
+                    'transcription_status: "ready"') + '\nSynthetic transcript ready.\n')
         before = note.read_bytes()
-        with mock.patch.object(e, 'transcribe_one', return_value='ready'), \
-             mock.patch.object(e, 'classify_one', return_value={'status':'failed','error':'model unavailable'}) as classify:
-            result = self.run_file(self.archive, transcribe='now', classify='after')
+        with mock.patch.object(e, 'classify_one', return_value={'status':'failed','error':'model unavailable'}) as classify:
+            result = self.run_file(self.archive, transcribe='later', classify='after')
         classify.assert_called_once()
         self.assertEqual(result['classification']['status'], 'failed')
         self.assertEqual(note.read_bytes(), before)
