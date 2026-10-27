@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # filename: innermaze.py
-# version: 0.1.3
+# version: 0.1.4
 # timestamp: 2026-10-26 14:34:00
 """Innermaze Mango-local audio importer and transcription worker; Obsidian plugin installed via BRAT.
 
@@ -458,7 +458,8 @@ def find_managed_audio(vault: Path, digest: str) -> Path | None:
 
 def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
                model_python: Path, model: str, whisper_root: Path = WHISPER,
-               manifest_db: Path = BACKUP_DB) -> Path | None:
+               manifest_db: Path = BACKUP_DB, *, identity_hint: str | None = None,
+               reuse_cached: bool = True, source_kind: str = 'arbitrary-file') -> Path | None:
     step(1, 6, "Validate the arbitrary audio source and destination vault")
     source = source.expanduser().absolute()
     if not source.is_file():
@@ -479,7 +480,7 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
     step(2, 6, "SHA-256 content identity: one playback asset per source")
     digest = digest_file(source)
     # Preserve Apple identity when uniquely attested by a readable manifest.
-    apple_id = archived_uuid(digest, source, manifest_db)
+    apple_id = identity_hint or archived_uuid(digest, source, manifest_db)
     prior_note = matching_note(vault, digest, apple_id)
     identity = (parse_note(prior_note.read_text("utf-8"))[0]["recording_id"] if prior_note else apple_id or f"audio-{digest}")
     inside = source_in_vault(source, vault)
@@ -492,7 +493,8 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
             if digest_file(old_asset) == saved_fields.get("playback_sha256", digest):
                 existing = old_asset
     # Validate the legacy index before any vault writes (ambiguity fails closed).
-    transcript_available = cached_transcript(digest, source, whisper_root) is not None
+    transcript_available = (cached_transcript(digest, source, whisper_root) is not None
+                            if auto_transcribe or reuse_cached else False)
     convert = existing is None and source.suffix.lower() not in IOS_PLAYABLE
     if convert:
         inside = None  # Native iOS playback requires an M4A derivative.
@@ -538,22 +540,23 @@ def import_any(source: Path, vault: Path, apply: bool, auto_transcribe: bool,
         raise ValueError("No vault audio is available")
     step(5, 6, "Create or preserve editable note and external timestamp link")
     playback_digest = digest_file(asset)
-    raw_note = make_arbitrary_note(identity, source.name, audio_rel, sync_rel, digest, playback_digest)
+    raw_note = make_arbitrary_note(identity, source.name, audio_rel, sync_rel, digest, playback_digest, source_kind=source_kind)
     atomic_create(note, raw_note.encode("utf-8"), TEMP_DIR)
     step(6, 6, "Imported and queued: nothing changed in source or archive")
     # Existing Whisper timing is reusable even with --no-transcribe and even
     # when MLX isn't installed. New Whisper jobs alone obey --no-transcribe.
-    if auto_transcribe or transcript_available:
+    if auto_transcribe or (transcript_available and reuse_cached):
         process_one(note, vault, model_python, model, whisper_root, manifest_db,
                     allow_new_transcription=auto_transcribe)
     return note
 
 
 def make_arbitrary_note(identity: str, title: str, audio_rel: str,
-                        sync_rel: str, digest: str, playback_digest: str) -> str:
+                        sync_rel: str, digest: str, playback_digest: str,
+                        source_kind: str = 'arbitrary-file') -> str:
     return "\n".join([
         "---", "voice_archive: true", f"recording_id: {yaml_string(identity)}",
-        'recording_source: "arbitrary-file"', f"source_title: {yaml_string(title)}",
+        f'recording_source: {yaml_string(source_kind)}', f"source_title: {yaml_string(title)}",
         f"display_title: {yaml_string(Path(title).stem)}",
         f"voice_audio: {yaml_string(audio_rel)}", f"voice_sync: {yaml_string(sync_rel)}",
         f"source_sha256: {yaml_string(digest)}",
