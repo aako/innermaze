@@ -1,0 +1,14 @@
+filters:
+  and:
+    - 'file.inFolder("Voice Archive")'
+    - 'list(categories).contains("Dreams")'
+views:
+  - type: table
+    name: Dreams by recording date
+    order:
+      - file.name
+      - recorded_at
+      - categories
+    sort:
+      - property: recorded_at
+        direction: ASC
