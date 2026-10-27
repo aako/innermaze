@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # filename: innermaze.py
-# version: 0.1.2
+# version: 0.1.3
 # timestamp: 2026-10-26 14:34:00
 """Innermaze Mango-local audio importer and transcription worker; Obsidian plugin installed via BRAT.
 
@@ -29,7 +29,7 @@ from typing import Any
 from urllib.parse import quote
 
 HOME = Path.home()
-WHISPER = HOME / "Work/Temp/VoiceMemoSaver/Whisper"
+WHISPER = HOME / "Code/VoiceMemoSaver/Whisper"
 BACKUP_DB = HOME / "Library/Application Support/VoiceAudioBackup/manifest.sqlite3"
 SOURCES = {
     "voice-memos": HOME / "Dropbox/1 NOTES/Voice Memos Full DB",
@@ -37,7 +37,7 @@ SOURCES = {
 }
 MLX_PYTHON = HOME / "Code/voxtral-tts-codes-for-audio/.venv/bin/python3"
 MODEL = "mlx-community/whisper-large-v3-turbo"
-TEMP_DIR = HOME / "Work/Temp/Innermaze"
+TEMP_DIR = HOME / "Code/.staging/Innermaze"
 AUDIO_EXTS = {".m4a", ".mp3", ".wav", ".aif", ".aiff", ".caf", ".flac", ".ogg", ".opus", ".aac", ".m4b", ".wma", ".amr", ".mp4", ".webm", ".qta"}
 IOS_PLAYABLE = {".m4a", ".mp3", ".wav", ".aif", ".aiff", ".aac", ".m4b", ".mp4", ".caf"}
 EXTS = AUDIO_EXTS
@@ -386,7 +386,7 @@ def atomic_create(destination: Path, source: Path | bytes, temp_root: Path) -> N
         except OSError as error:
             if error.errno != errno.EXDEV:
                 raise
-            # External vault disks cannot hardlink to ~/Work/Temp: create-only copy.
+            # Across filesystems, hardlinking is unavailable: use create-only copy.
             try:
                 handle = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             except FileExistsError:

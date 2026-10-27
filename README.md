@@ -1,8 +1,8 @@
 # Innermaze
 
-**Innermaze 0.1.6** — an Obsidian plugin for listening to audio alongside editable, line-synchronized Markdown transcripts. This is an evolving pilot; the 0.1.5 lossless A/B engines have been verified by the user on iOS, locked and unlocked. The automatic 0.1.6 behavior still needs device testing.
+**Innermaze 0.1.9** — an Obsidian plugin for listening to audio alongside editable, line-synchronized Markdown transcripts. This is an evolving pilot; the 0.1.5 lossless A/B engines have been verified by the user on iOS, locked and unlocked. The automatic 0.1.6 behavior still needs device testing.
 
-The Obsidian plugin lives at the repository root: `main.js`, `manifest.json`, and `styles.css`. Its **separate, optional** Mango transcription/import helper is at `tools/innermaze.py`. The helper is never installed or updated by BRAT.
+The Obsidian plugin lives at the repository root: `main.js`, `manifest.json`, and `styles.css`. Its **separate, optional** Mango transcription/import helper is at `tools/innermaze.py`. The helper is never installed or updated by BRAT. Its scratch files live under `~/Code/.staging/Innermaze`; original Whisper caches are read from `~/Code/VoiceMemoSaver/Whisper`.
 
 ## Architecture
 
@@ -60,7 +60,7 @@ player opened by **Innermaze: Open player for current voice recording**.
 
 ## Existing Voice Memos transcripts — automatic reuse (Mango helper 0.1.1)
 
-Importing a file with `--file`, or processing a pending note created by the Obsidian mobile importer, now looks up **the source audio SHA-256** in both existing `identity.tsv` indices under `~/Work/Temp/VoiceMemoSaver/Whisper/`. If matching word-timed `.json` exists, Innermaze creates the normal editable Markdown and external `.sync.json` directly; **it does not run MLX Whisper again**. This also works for renamed archived recordings. Repeated imports preserve existing notes and corrections.
+Importing a file with `--file`, or processing a pending note created by the Obsidian mobile importer, now looks up **the source audio SHA-256** in both existing `identity.tsv` indices under `~/Code/VoiceMemoSaver/Whisper/`. If matching word-timed `.json` exists, Innermaze creates the normal editable Markdown and external `.sync.json` directly; **it does not run MLX Whisper again**. This also works for renamed archived recordings. Repeated imports preserve existing notes and corrections.
 
 ```fish
 python3 ~/Code/Innermaze/tools/innermaze.py --file "/Users/ak/Dropbox/1 NOTES/Voice Memos Full DB/2026-09-03 07-52-07 - Dream - film photo shoot.m4a"

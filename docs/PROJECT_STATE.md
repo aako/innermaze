@@ -1,3 +1,11 @@
+## Mango-only path migration after 0.1.9 (no BRAT release)
+
+- The 2026-10-26 migration relocated `~/Work/Temp/VoiceMemoSaver` to `~/Code/VoiceMemoSaver`, and `~/Work/Temp/Innermaze` to `~/Code/.staging/Innermaze/legacy-temp`. Compatibility symlinks were created at both former locations.
+- In importer source v0.1.3, `WHISPER` now points directly to `~/Code/VoiceMemoSaver/Whisper`; `TEMP_DIR` to `~/Code/.staging/Innermaze`. Source-hash/Apple UUID matching, imported media and transcription output logic are otherwise unchanged.
+- The standalone `~/Code/LLMRunner/bin/innermaze` is separately packaged from the GitHub source. Update it only when recognized as an intact Python helper; never enable the transcription LaunchAgent.
+- The shared `~/Work/Temp/VoiceMemoSaver` alias is deliberately preserved for unrelated consumers. The `~/Work/Temp/Innermaze` alias can be unlinked only after the executable and live project references are clear; unlinking never removes its target.
+- Source-only commit: `manifest.json` remains at 0.1.9, and no new BRAT tag or release is created.
+
 ## Release 0.1.9: restore Markdown navigation, auto-open recording notes
 
 0.1.8 **failed in actual Obsidian on Mac**: auto-open did not consistently activate, and manually opened FileView was reused when the user clicked an unrelated Clippings note. The old recording UI stayed visible while the tab and breadcrumb followed the unrelated document. The files were not edited by the view error.

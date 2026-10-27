@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # filename: test_importer.py
-# version: 0.1.2
+# version: 0.1.3
 # timestamp: 2026-10-24 16:54:00
 from __future__ import annotations
 import hashlib
@@ -22,6 +22,12 @@ innermaze = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(innermaze)
 
 class ImporterTests(unittest.TestCase):
+    def test_default_migrated_paths_never_reference_work_temp(self):
+        self.assertEqual(innermaze.WHISPER, innermaze.HOME / 'Code/VoiceMemoSaver/Whisper')
+        self.assertEqual(self.original_temp, innermaze.HOME / 'Code/.staging/Innermaze')
+        self.assertNotIn('Work/Temp', str(innermaze.WHISPER))
+        self.assertNotIn('Work/Temp', str(self.original_temp))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
