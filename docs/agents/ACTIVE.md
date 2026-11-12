@@ -37,3 +37,16 @@
 - First real GUI import (`Later` transcription, `Skip` Qwen) reached Python identity inspection but failed before import: Obsidian child process did not inherit Homebrew/MacPorts PATH, so `ffprobe` could not be located (`FileNotFoundError`). No audio import or model run confirmed.
 - Agent E fixed only the desktop child-process PATH and added a targeted launcher regression; original source files and independent archiver remain untouched.
 - Next: reinstall updated `main.js` directly into Cabinet; reload plugin; retry exact same original via UI; confirm playable note, dedup, original source SHA, then targeted Whisper and Qwen. No BRAT or synthetic-vault test.
+
+## 2026-11-06 Mobile imports and Combine
+
+- **Branch:** `integration/agent-e-pilot-hardening-v1`.
+- **Source implementation:** `3e7a498fa707d1c140a557542a6824470810ac95` (subsequent status commit may advance HEAD).
+- **Validation:** 21/21 regression commands passed locally on Mango, including Agent B's original UUID/iPhone/Dropbox tests and FFmpeg Combine + desktop command tests.
+- **Mobile:** Agent B source-only ZIP integrated *unchanged* into single-file iPhone import. New notes bind embedded Apple UUID; exact reimports reuse notes, ambiguous remuxes block; Mango packet-aware identity remains authoritative for later Dropbox reconciliation.
+- **Combine:** Mango-only `Combine recordings` Obsidian command; ordered 2–10 distinct existing notes, trim start/end (0–30s), verified listening hashes, AAC output, deterministic `combined-<recipe_sha>` identity, read-only source notes/audio, standalone JSON provenance, pending full-duration Whisper.
+- **Cabinet plugin:** Directly installed to real Cabinet by this publisher; reload Obsidian on Mango and iPhone. iOS runtime/device behavior is **not yet verified**.
+- **Source archives:** permanent Dropbox Voice Memos and Just Press Record roots never written; VoiceAudioBackup SQLite is not opened for writing; no worker, main merge, manifest bump or BRAT release.
+- **Agent roles:** B owns immutable UUID/reconciliation; C owns future picker/share-sheet UI; E owns this current mobile/Combine integration and real-device debugging; D human-review UI remains deferred; Agent 0 coordinates architectural issues.
+- **Blockers / next test:** in actual iPhone Obsidian, use Files to import two interrupted Voice Memos into Cabinet, allow iCloud sync; in Mango Obsidian, use `Combine recordings (Mango)`, confirm ordered audio and one combined note, then `Transcribe current recording on Mango`; verify originals and packet-safe Dropbox reconciliation. Existing recordings and human edits must remain unchanged. Share-sheet direct handoff is not implemented yet; Files picker is supported.
+
