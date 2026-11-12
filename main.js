@@ -1064,12 +1064,273 @@ async function ensureFolder(app, path) {
   }
 }
 
-function makeGenericNote(id, title, audioPath, digest) {
+// BEGIN Agent B mobile UUID import (source-only contribution)
+const innermazeMobileIdentity = (() => {
+// filename: mobile_recording_identity.cjs
+// version: 0.2.0
+// timestamp: 2026-10-27 14:38:00
+'use strict';
+
+/** Read-only bounded MP4 metadata reader for Agent C's Obsidian/iOS importer.
+ * Supports mdta keys/ilst and iTunes ---- freeform metadata; skips mdat.
+ * Returns a canonical uppercase UUID or null. No filename or hash inference.
+ * UUID alone identifies a *recording*, not an unchanged audio version.
+ */
+const DECODER = new TextDecoder('utf-8', {fatal: true});
+const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+function canonical(raw) {
+  if (typeof raw !== 'string' || !UUID.test(raw.trim())) throw new Error('Invalid voice-memo-uuid metadata');
+  return raw.trim().toUpperCase();
+}
+function viewOf(input) {
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  throw new TypeError('Expected an ArrayBuffer or typed-array view');
+}
+function uint(bytes, offset) {
+  return new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0, false);
+}
+function text(bytes, start, end) { return DECODER.decode(bytes.subarray(start, end)); }
+function boxes(bytes, start, end) {
+  const result = [];
+  let pos = start;
+  while (pos + 8 <= end) {
+    let size = uint(bytes, pos);
+    const type = String.fromCharCode(...bytes.subarray(pos + 4, pos + 8));
+    let header = 8;
+    if (size === 1) {
+      if (pos + 16 > end) throw new Error('Truncated extended MP4 atom');
+      const high = uint(bytes, pos + 8), low = uint(bytes, pos + 12);
+      size = high * 0x100000000 + low;
+      header = 16;
+      if (!Number.isSafeInteger(size)) throw new Error('Oversize MP4 atom');
+    } else if (size === 0) size = end - pos;
+    if (size < header || size > end - pos) throw new Error('Malformed MP4 atom length');
+    result.push({type, start: pos, data: pos + header, end: pos + size});
+    pos += size;
+  }
+  if (pos !== end) throw new Error('Partial MP4 atom');
+  return result;
+}
+function extractData(bytes, item) {
+  for (const child of boxes(bytes, item.data, item.end)) {
+    if (child.type === 'data' && child.end >= child.data + 8) {
+      return text(bytes, child.data + 8, child.end).replace(/\0+$/, '');
+    }
+  }
+  return null;
+}
+function mdtaKeys(bytes, atom) {
+  if (atom.end < atom.data + 8) throw new Error('Malformed MP4 keys atom');
+  const count = uint(bytes, atom.data + 4);
+  if (count > 50000) throw new Error('Excessive MP4 metadata keys');
+  const entries = [];
+  let pos = atom.data + 8;
+  for (let i = 0; i < count; i++) {
+    if (pos + 8 > atom.end) throw new Error('Truncated MP4 metadata key');
+    const size = uint(bytes, pos);
+    if (size < 8 || pos + size > atom.end) throw new Error('Malformed MP4 metadata key');
+    const namespace = text(bytes, pos + 4, pos + 8);
+    entries.push(namespace === 'mdta' ? text(bytes, pos + 8, pos + size) : null);
+    pos += size;
+  }
+  return entries;
+}
+function freeform(bytes, item) {
+  let mean = null, name = null, value = null;
+  for (const child of boxes(bytes, item.data, item.end)) {
+    if ((child.type === 'mean' || child.type === 'name') && child.end >= child.data + 4) {
+      const v = text(bytes, child.data + 4, child.end);
+      if (child.type === 'mean') mean = v;
+      else name = v;
+    }
+    if (child.type === 'data' && child.end >= child.data + 8) value = text(bytes, child.data + 8, child.end);
+  }
+  return name === 'voice-memo-uuid' && (mean === 'com.apple.iTunes' || mean === 'mdta' || mean === 'com.apple.VoiceMemos') ? value : null;
+}
+function readMeta(bytes, meta, found) {
+  if (meta.end < meta.data + 4) throw new Error('Truncated meta full box');
+  const children = boxes(bytes, meta.data + 4, meta.end);
+  const keysBox = children.find(box => box.type === 'keys');
+  const keys = keysBox ? mdtaKeys(bytes, keysBox) : [];
+  for (const ilst of children.filter(box => box.type === 'ilst')) {
+    for (const item of boxes(bytes, ilst.data, ilst.end)) {
+      if (item.type === '----') {
+        const value = freeform(bytes, item);
+        if (value !== null) found.push(canonical(value));
+        continue;
+      }
+      const index = uint(bytes, item.start + 4);
+      if (index > 0 && keys[index - 1] === 'voice-memo-uuid') {
+        const value = extractData(bytes, item);
+        if (value === null) throw new Error('Voice Memo UUID metadata has no data atom');
+        found.push(canonical(value));
+      }
+    }
+  }
+}
+function parseAppleVoiceMemoUuid(input) {
+  const bytes = viewOf(input);
+  const found = [];
+  const visit = (start, end, depth) => {
+    if (depth > 6) throw new Error('MP4 metadata nesting too deep');
+    for (const atom of boxes(bytes, start, end)) {
+      if (atom.type === 'meta') readMeta(bytes, atom, found);
+      else if (atom.type === 'moov' || atom.type === 'udta' || atom.type === 'trak') {
+        visit(atom.data, atom.end, depth + 1);
+      }
+    }
+  };
+  visit(0, bytes.length, 0);
+  if (new Set(found).size > 1) throw new Error('Conflicting embedded Apple Voice Memo UUIDs');
+  return found[0] || null;
+}
+
+
+/** Strict, bounded frontmatter-only reader. Never interpret names as identities. */
+function mobileNoteFields(source) {
+  const match = String(source).match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) return null;
+  const fields = Object.create(null);
+  const wanted = new Set(['voice_archive', 'recording_id', 'archive_recording_id',
+    'source_sha256', 'playback_sha256', 'voice_audio', 'voice_sync']);
+  for (const line of match[1].split(/\r?\n/)) {
+    const parsed = /^([a-z][a-z0-9_]*):\s*(.*?)\s*$/.exec(line);
+    if (!parsed || !wanted.has(parsed[1])) continue;
+    const key = parsed[1];
+    if (Object.prototype.hasOwnProperty.call(fields, key))
+      throw new Error(`Duplicate recording frontmatter key: ${key}`);
+    const raw = parsed[2];
+    let value;
+    if (raw.startsWith('"')) {
+      try { value = JSON.parse(raw); }
+      catch (_) { throw new Error(`Malformed recording frontmatter: ${key}`); }
+      if (typeof value !== 'string') throw new Error(`Non-string recording frontmatter: ${key}`);
+    } else if (raw.startsWith("'") && raw.endsWith("'")) {
+      value = raw.slice(1, -1).replace(/''/g, "'");
+    } else {
+      value = raw;
+    }
+    fields[key] = value;
+  }
+  if (String(fields.voice_archive || '').toLowerCase() !== 'true') return null;
+  if (!fields.recording_id || !fields.voice_audio || !fields.voice_sync)
+    throw new Error('Malformed Voice Archive recording requires manual review');
+  return fields;
+}
+
+function mobileBoundUuid(fields) {
+  const ids = [];
+  for (const name of ['recording_id', 'archive_recording_id']) {
+    const value = fields[name];
+    if (!value) continue;
+    if (/^vm-/i.test(value)) ids.push(canonical(value.slice(3)));
+    else if (name === 'archive_recording_id')
+      throw new Error('Unexpected archive_recording_id requires manual review');
+  }
+  if (new Set(ids).size > 1) throw new Error('Conflicting UUID aliases on recording note');
+  return ids[0] || null;
+}
+
+const MOBILE_SHA = /^[0-9a-f]{64}$/i;
+/** Pure mobile import planner. No writes, filenames, timestamps or AAC guesses.
+ * Decision: {action:'create_note'|'reuse_note'|'review_required',reason,notePath?,recordingId}.
+ * For an unchanged imported file an identical verified whole-file SHA is sufficient.
+ * A same-UUID different-container import MUST await Mango's compressed-packet check.
+ */
+function planMobileImport(candidate, notes) {
+  if (!candidate || !MOBILE_SHA.test(String(candidate.fileSha256 || '')))
+    throw new Error('Missing or invalid import SHA-256');
+  if (!Array.isArray(notes)) throw new TypeError('Recording note snapshots must be an array');
+  const fileSha = candidate.fileSha256.toLowerCase();
+  const uid = candidate.appleUuid == null ? null : canonical(candidate.appleUuid);
+  const desiredId = uid ? `vm-${uid}` : `audio-${fileSha}`;
+  const rows = [];
+  const seenPaths = new Set();
+  const seenIds = new Set();
+  for (const note of notes) {
+    if (!note || typeof note.path !== 'string' || typeof note.source !== 'string')
+      throw new Error('Invalid recording note snapshot');
+    if (seenPaths.has(note.path)) throw new Error('Duplicate recording note path');
+    seenPaths.add(note.path);
+    const fields = mobileNoteFields(note.source);
+    if (!fields) continue;
+    const idKey = fields.recording_id.toLowerCase();
+    if (seenIds.has(idKey))
+      return {action: 'review_required', reason: 'duplicate_recording_id', recordingId: desiredId};
+    seenIds.add(idKey);
+    for (const key of ['source_sha256', 'playback_sha256']) {
+      if (fields[key] && !MOBILE_SHA.test(fields[key]))
+        throw new Error(`Invalid ${key} on a recording note`);
+    }
+    const boundUuid = mobileBoundUuid(fields);
+    const exact = [fields.source_sha256, fields.playback_sha256].some(
+      digest => digest && digest.toLowerCase() === fileSha);
+    rows.push({path: note.path, fields, boundUuid, exact});
+  }
+  const decision = (action, reason, note) => ({action, reason, recordingId: desiredId,
+    ...(note ? {notePath: note.path, existingRecordingId: note.fields.recording_id} : {})});
+  if (uid) {
+    const bound = rows.filter(row => row.boundUuid === uid);
+    if (bound.length > 1) return decision('review_required', 'duplicate_uuid_binding');
+    if (bound.length === 1) {
+      if (bound[0].exact) return decision('reuse_note', 'same_uuid_exact_file', bound[0]);
+      return decision('review_required', 'same_uuid_unverified_audio_version', bound[0]);
+    }
+    // One immutable file can legitimately be shared by distinct Apple UUIDs.
+    // But an anonymous/legacy note matching the file cannot be claimed silently.
+    const legacy = rows.filter(row => !row.boundUuid && row.exact);
+    if (legacy.length) return decision('review_required', 'possible_legacy_hash_note');
+    const collision = rows.find(row => row.fields.recording_id.toLowerCase() === desiredId.toLowerCase());
+    if (collision) return decision('review_required', 'recording_id_collision', collision);
+    return decision('create_note', 'new_apple_uuid');
+  }
+  const exact = rows.filter(row => row.exact);
+  if (exact.some(row => row.boundUuid)) return decision('review_required', 'missing_uuid_matches_uuid_recording');
+  if (exact.length > 1) return decision('review_required', 'missing_uuid_multiple_matches');
+  if (exact.length === 1) {
+    if (exact[0].fields.recording_id.toLowerCase() === desiredId)
+      return decision('reuse_note', 'anonymous_exact_file', exact[0]);
+    return decision('review_required', 'missing_uuid_conflicting_identity');
+  }
+  if (rows.some(row => row.fields.recording_id.toLowerCase() === desiredId))
+    return decision('review_required', 'recording_id_collision');
+  return decision('create_note', 'new_anonymous_file');
+}
+
+return {parseAppleVoiceMemoUuid, mobileNoteFields, mobileBoundUuid, planMobileImport};
+
+})();
+
+// filename: mobile_import_methods.cjs
+// version: 0.2.0
+// timestamp: 2026-10-27 14:38:00
+// Agent B: complete iOS import implementations. Injected into main.js by candidate builder.
+// Requires the existing Innermaze globals: TFile, Notice, ImportProgress, safeTitle,
+// sha256Buffer, ensureFolder, waitTick, NOTE_DIR, LEGACY_NOTE_DIR, AUDIO_DIR,
+// SYNC_DIR, PICKER_MAX_BYTES, isAudioName, encodeYaml, plugin.app.
+
+async function innermazeMobileSnapshots(app) {
+  const notes = [];
+  for (const file of app.vault.getMarkdownFiles()) {
+    const folder = file.parent?.path || file.path.slice(0, file.path.lastIndexOf('/'));
+    if (folder !== NOTE_DIR && folder !== LEGACY_NOTE_DIR) continue;
+    notes.push({path: file.path, source: await app.vault.read(file)});
+  }
+  return notes;
+}
+
+async function innermazePlanMobile(plugin, digest, appleUuid) {
+  return innermazeMobileIdentity.planMobileImport(
+    {fileSha256: digest, appleUuid}, await innermazeMobileSnapshots(plugin.app));
+}
+
+function makeGenericNote(id, title, audioPath, digest, appleUuid = null) {
   const fields = [
     '---',
     'voice_archive: true',
     `recording_id: ${encodeYaml(id)}`,
-    `recording_source: "arbitrary-file"`,
+    `recording_source: ${encodeYaml(appleUuid ? 'apple-voice-memo' : 'arbitrary-file')}`,
     `source_title: ${encodeYaml(title)}`,
     `display_title: ${encodeYaml(title)}`,
     `voice_audio: ${encodeYaml(audioPath)}`,
@@ -1085,30 +1346,57 @@ function makeGenericNote(id, title, audioPath, digest) {
   return fields.join('\n') + '\n';
 }
 
-async function makeNoteAndOpen(plugin, title, audioPath, digest, progress) {
-  const id = `audio-${digest}`;
-  const notePath = `${NOTE_DIR}/${id}.md`;
-  progress.step(5, 'Creating or reusing editable transcript note');
-  await ensureFolder(plugin.app, NOTE_DIR);
-  const matches = [];
-  for (const file of plugin.app.vault.getMarkdownFiles()) {
-    const folder = file.parent?.path || file.path.slice(0, file.path.lastIndexOf('/'));
-    if (folder !== NOTE_DIR && folder !== LEGACY_NOTE_DIR) continue;
-    // Read actual frontmatter: the metadata cache can lag a rename/import on iOS.
-    const source = await plugin.app.vault.cachedRead(file);
-    if (isRecordingNote(file, source) && parseNote(source).fields.recording_id === id) {
-      matches.push(file);
-    } else if (file.path === notePath || file.path === `${LEGACY_NOTE_DIR}/${id}.md`) {
-      throw new Error(`Note destination belongs to different content: ${file.path}`);
-    }
+async function makeNoteAndOpen(plugin, title, audioPath, digest, progress, appleUuid = null) {
+  progress.step(5, 'Verifying immutable recording identity');
+  // Re-scan after any asynchronous iCloud audio copy to avoid stale conclusions.
+  const plan = await innermazePlanMobile(plugin, digest, appleUuid);
+  if (plan.action === 'review_required') {
+    throw new Error(`Recording identity needs review: ${plan.reason}. No note was changed.`);
   }
-  if (matches.length > 1) throw new Error('Several notes have the same recording ID; refusing duplicate import');
-  let note = matches[0] || plugin.app.vault.getAbstractFileByPath(notePath);
-  if (note && !(note instanceof TFile)) throw new Error('Import note path already exists and is not a file.');
-  if (!note) note = await plugin.app.vault.create(notePath, makeGenericNote(id, safeTitle(title), audioPath, digest));
-  progress.step(6, 'Complete: queued for local Mango transcription');
+  let note;
+  if (plan.action === 'reuse_note') {
+    note = plugin.app.vault.getAbstractFileByPath(plan.notePath);
+    if (!(note instanceof TFile)) throw new Error('Verified existing recording note is unavailable.');
+    // No note changes on reuse: links, renamed paths, titles, transcripts and
+    // existing playback/resume positions all remain exactly as they were.
+  } else if (plan.action === 'create_note') {
+    if (!audioPath) throw new Error('New recording has no verified listening asset.');
+    const audio = plugin.app.vault.getAbstractFileByPath(audioPath);
+    if (!(audio instanceof TFile)) throw new Error('Listening asset unavailable; refusing orphan note.');
+    await ensureFolder(plugin.app, NOTE_DIR);
+    const notePath = `${NOTE_DIR}/${plan.recordingId}.md`;
+    if (plugin.app.vault.getAbstractFileByPath(notePath))
+      throw new Error(`Existing note destination requires review: ${notePath}`);
+    note = await plugin.app.vault.create(notePath, makeGenericNote(
+      plan.recordingId, safeTitle(title), audioPath, digest, appleUuid));
+  } else {
+    throw new Error(`Unexpected recording identity decision: ${plan.action}`);
+  }
+  progress.step(6, 'Complete: recording note preserved or queued');
   await plugin.app.workspace.getLeaf(true).openFile(note);
-  new Notice('Audio is in your iCloud vault. Transcription will run on Mango.');
+  new Notice(plan.action === 'reuse_note' ?
+    'Already imported: existing recording note opened unchanged.' :
+    'Audio imported. Transcription is available on Mango.');
+  return note;
+}
+
+function innermazeEmbeddedAppleUuid(bytes, name) {
+  const ext = String(name).split('.').pop().toLowerCase();
+  // Other codecs are not known to carry Apple MP4 metadata. A missing UUID
+  // never gets guessed from the title, iOS export filename, date or audio hash.
+  return ['m4a', 'mp4', 'm4b'].includes(ext) ?
+    innermazeMobileIdentity.parseAppleVoiceMemoUuid(bytes) : null;
+}
+
+async function innermazeVerifiedManagedAudio(plugin, digest) {
+  const matches = plugin.app.vault.getFiles().filter(
+    f => f.path.startsWith(`${AUDIO_DIR}/sha256-${digest}.`));
+  for (const file of matches) {
+    const bytes = await plugin.app.vault.readBinary(file);
+    if (await sha256Buffer(bytes) !== digest)
+      throw new Error(`Hash-named listening asset has unexpected contents: ${file.path}`);
+  }
+  return matches.length ? matches[0].path : null;
 }
 
 async function importPickedAudio(plugin) {
@@ -1124,27 +1412,35 @@ async function importPickedAudio(plugin) {
       try {
         progress.step(1, `Reading ${file.name}`); await waitTick();
         if (!isAudioName(file.name)) throw new Error(`Not a supported audio extension: ${file.name}`);
-        if (file.size > PICKER_MAX_BYTES) {
-          throw new Error('Over 200 MiB: use the desktop Python importer to avoid exhausting Obsidian mobile memory.');
-        }
+        if (file.size > PICKER_MAX_BYTES)
+          throw new Error('Over 200 MiB: use the desktop importer to avoid exhausting mobile memory.');
         const bytes = await file.arrayBuffer();
-        progress.step(2, 'Computing identity'); await waitTick();
+        progress.step(2, 'Reading Apple identity and verifying SHA-256'); await waitTick();
         const digest = await sha256Buffer(bytes);
-        await ensureFolder(plugin.app, AUDIO_DIR);
-        const candidate = plugin.app.vault.getFiles().find(f => f.path.startsWith(`${AUDIO_DIR}/sha256-${digest}.`));
-        let audioPath = candidate?.path;
-        progress.step(3, candidate ? 'Identical audio found; reusing it' : 'Writing one iCloud playback copy'); await waitTick();
-        if (!audioPath) {
-          const ext = file.name.split('.').pop().toLowerCase();
-          audioPath = `${AUDIO_DIR}/sha256-${digest}.${ext}`;
-          const current = plugin.app.vault.getAbstractFileByPath(audioPath);
-          if (!current) await plugin.app.vault.createBinary(audioPath, bytes);
-          else if (!(current instanceof TFile)) throw new Error('Audio destination is a folder.');
+        const appleUuid = innermazeEmbeddedAppleUuid(bytes, file.name);
+        const plan = await innermazePlanMobile(plugin, digest, appleUuid);
+        if (plan.action === 'review_required')
+          throw new Error(`Recording identity needs review: ${plan.reason}. No import was written.`);
+        let audioPath = null;
+        if (plan.action === 'create_note') {
+          progress.step(3, 'Preparing verified iCloud listening asset'); await waitTick();
+          await ensureFolder(plugin.app, AUDIO_DIR);
+          audioPath = await innermazeVerifiedManagedAudio(plugin, digest);
+          if (!audioPath) {
+            const ext = file.name.split('.').pop().toLowerCase();
+            audioPath = `${AUDIO_DIR}/sha256-${digest}.${ext}`;
+            const other = plugin.app.vault.getAbstractFileByPath(audioPath);
+            if (other) throw new Error('Audio path already exists but is not a verified managed asset.');
+            await plugin.app.vault.createBinary(audioPath, bytes);
+          }
+        } else {
+          progress.step(3, 'Reusing existing recording without audio duplication'); await waitTick();
         }
-        progress.step(4, 'Audio imported');
-        await makeNoteAndOpen(plugin, file.name, audioPath, digest, progress);
-      } catch (error) { new Notice(`Audio import stopped: ${error.message || error}`, 12000); }
-      finally { progress.close(); }
+        progress.step(4, 'Validating recording note');
+        await makeNoteAndOpen(plugin, file.name, audioPath, digest, progress, appleUuid);
+      } catch (error) {
+        new Notice(`Audio import stopped: ${error.message || error}`, 12000);
+      } finally { progress.close(); }
     }
   }, {once: true});
   input.click();
@@ -1155,18 +1451,24 @@ async function importVaultAudio(plugin, file) {
   progress.open();
   try {
     progress.step(1, 'Reading existing vault audio'); await waitTick();
-    if (file.stat.size > PICKER_MAX_BYTES) {
-      throw new Error('Over 200 MiB: use the desktop Python importer for streaming SHA-256.');
-    }
+    if (file.stat.size > PICKER_MAX_BYTES)
+      throw new Error('Over 200 MiB: use the desktop importer for streaming SHA-256.');
     const bytes = await plugin.app.vault.readBinary(file);
-    progress.step(2, 'Hashing existing attachment'); await waitTick();
+    progress.step(2, 'Checking recording identity'); await waitTick();
     const digest = await sha256Buffer(bytes);
-    progress.step(3, 'Reusing vault file: zero copying');
+    const appleUuid = innermazeEmbeddedAppleUuid(bytes, file.name);
+    const preview = await innermazePlanMobile(plugin, digest, appleUuid);
+    if (preview.action === 'review_required')
+      throw new Error(`Recording identity needs review: ${preview.reason}. No note was changed.`);
+    progress.step(3, 'Reusing existing vault audio');
     progress.step(4, 'Checking existing notes');
-    await makeNoteAndOpen(plugin, file.name, file.path, digest, progress);
-  } catch (error) { new Notice(`Audio import stopped: ${error.message || error}`, 12000); }
-  finally { progress.close(); }
+    await makeNoteAndOpen(plugin, file.name, file.path, digest, progress, appleUuid);
+  } catch (error) {
+    new Notice(`Audio import stopped: ${error.message || error}`, 12000);
+  } finally { progress.close(); }
 }
+
+// END Agent B mobile UUID import
 
 // Strictly configured Mango candidate helper: no fallback to working main checkout.
 function innermazeResolveMangoHelper(plugin) {
@@ -1365,6 +1667,153 @@ class InnermazeImportAndProcessModal extends Modal {
   onClose() {this.contentEl.empty();}
 }
 
+// BEGIN Agent E desktop-only non-destructive recording combination
+async function innermazeRunCombine(plugin, items, title) {
+  if (!Platform.isDesktopApp) throw new Error('Combine recordings currently runs on Mango desktop.');
+  const fs = require('fs');
+  const path = require('path');
+  const {spawn} = require('child_process');
+  const helper = innermazeResolveMangoHelper(plugin);
+  const script = path.join(path.dirname(helper), 'innermaze_combine.py');
+  if (!fs.existsSync(script) || !fs.statSync(script).isFile())
+    throw new Error('The worktree Combine helper is unavailable: ' + script);
+  const vault = plugin.app.vault.adapter.getBasePath?.();
+  if (!vault || !fs.existsSync(path.join(vault, '.obsidian')))
+    throw new Error('Combine requires a locally mounted Obsidian vault on Mango.');
+  const argv = [script, '--vault', vault, '--items-json', JSON.stringify(items),
+                '--title', title, '--apply'];
+  const env = {...require('node:process').env};
+  env.PATH = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/opt/local/bin',
+              env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'].join(':');
+  let stdout = '', stderr = '';
+  await new Promise((resolve, reject) => {
+    const child = spawn('/usr/bin/python3', argv,
+                        {shell:false, env, stdio:['ignore', 'pipe', 'pipe']});
+    child.stdout.on('data', chunk => { stdout = (stdout + String(chunk)).slice(-20000); });
+    child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-10000); });
+    child.on('error', reject);
+    child.on('close', code => code === 0 ? resolve() :
+      reject(new Error('Combine helper failed (' + code + '): ' + stderr.slice(-1400))));
+  });
+  const receipt = stdout.split(/\r?\n/).find(line => line.startsWith('INNERMAZE_COMBINE_JSON='));
+  if (!receipt) throw new Error('Combine helper did not return a machine-readable receipt.');
+  return JSON.parse(receipt.slice('INNERMAZE_COMBINE_JSON='.length));
+}
+
+class InnermazeCombineModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this.selected = [];
+    this.available = [];
+    this.title = 'Combined voice memo';
+    this.running = false;
+  }
+  async onOpen() {
+    this.setTitle('Innermaze — Combine recordings');
+    this.contentEl.createEl('p', {text:'Join existing Cabinet recordings in the selected order. Original audio, UUIDs, notes and transcripts stay untouched.'});
+    try {
+      for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+        if (!file.path.startsWith('Voice Archive/')) continue;
+        const folder = file.parent?.path || file.path.slice(0, file.path.lastIndexOf('/'));
+        if (folder !== NOTE_DIR && folder !== LEGACY_NOTE_DIR) continue;
+        const raw = await this.plugin.app.vault.read(file);
+        if (!isRecordingNote(file, raw)) continue;
+        const {fields} = parseNote(raw);
+        if (/^recording_source:\s*["']?combined-recording["']?\s*$/m.test(raw)) continue;
+        this.available.push({path:file.path,
+          title:String(fields.display_title || file.basename || file.name)});
+      }
+      this.available.sort((a,b) => a.title.localeCompare(b.title));
+      if (this.available.length < 2) {
+        this.contentEl.createEl('p', {text:'Import at least two original recordings before combining.'});
+        return;
+      }
+      const active = this.plugin.app.workspace.getActiveFile()?.path;
+      const first = this.available.some(recording=>recording.path===active) ? active : this.available[0].path;
+      const other = this.available.find(recording=>recording.path!==first).path;
+      this.selected = [{note:first,trim_start:'0',trim_end:'0'},
+                       {note:other,trim_start:'0',trim_end:'0'}];
+      this.draw();
+    } catch (error) {
+      new Notice('Cannot list Cabinet recordings: ' + (error.message || error), 12000);
+      this.close();
+    }
+  }
+  draw() {
+    if (!this.available.length) return;
+    this.contentEl.empty();
+    this.setTitle('Innermaze — Combine recordings');
+    this.contentEl.createEl('p', {text:'Choose the playback order. Trim start/end in seconds to omit an overlap; zero keeps the complete recording.'});
+    this.selected.forEach((entry, index) => {
+      const row = new Setting(this.contentEl).setName(`Part ${index+1}`)
+        .setDesc('Original kept; trims affect combined copy only');
+      row.addDropdown(dropdown => {
+        for (const choice of this.available) dropdown.addOption(choice.path,choice.title);
+        dropdown.setValue(entry.note);
+        dropdown.onChange(value => {entry.note=value;});
+      });
+      row.addText(text => text.setPlaceholder('Start trim, s')
+        .setValue(String(entry.trim_start)).onChange(value=>{entry.trim_start=value;}));
+      row.addText(text => text.setPlaceholder('End trim, s')
+        .setValue(String(entry.trim_end)).onChange(value=>{entry.trim_end=value;}));
+      row.addButton(button => button.setButtonText('↑').setTooltip('Earlier')
+        .setDisabled(index===0).onClick(()=>{[this.selected[index-1],this.selected[index]]=
+          [this.selected[index],this.selected[index-1]];this.draw();}));
+      row.addButton(button => button.setButtonText('↓').setTooltip('Later')
+        .setDisabled(index===this.selected.length-1).onClick(()=>{
+          [this.selected[index],this.selected[index+1]]=
+          [this.selected[index+1],this.selected[index]];this.draw();}));
+      row.addButton(button => button.setButtonText('Remove')
+        .setDisabled(this.selected.length<=2).onClick(()=>{
+          this.selected.splice(index,1);this.draw();}));
+    });
+    if (this.selected.length < Math.min(this.available.length,10)) {
+      new Setting(this.contentEl).addButton(button => button.setButtonText('Add recording')
+        .onClick(()=>{
+          const unused=this.available.find(entry=>!this.selected.some(item=>item.note===entry.path));
+          if (unused) {this.selected.push({note:unused.path,trim_start:'0',trim_end:'0'});this.draw();}
+        }));
+    }
+    new Setting(this.contentEl).setName('Combined title').addText(text =>
+      text.setValue(this.title).onChange(value=>{this.title=value;}));
+    new Setting(this.contentEl).addButton(button => button.setButtonText('Create combined recording')
+      .setCta().onClick(async()=>{
+        if (this.running) return;
+        try {
+          const paths=this.selected.map(entry=>entry.note);
+          if (new Set(paths).size!==paths.length) throw new Error('Choose distinct recordings.');
+          for (const entry of this.selected) {
+            for (const key of ['trim_start','trim_end']) {
+              const value=Number(entry[key]);
+              if (!Number.isFinite(value) || value<0 || value>30)
+                throw new Error('Each trim must be between 0 and 30 seconds.');
+            }
+          }
+          const selected=this.selected.map(entry=>({...entry}));
+          this.running=true;
+          new Notice('Innermaze: combining ' + selected.length + ' recordings on Mango…',7000);
+          const result=await innermazeRunCombine(this.plugin,selected,this.title);
+          let note=null;
+          for(let attempt=0;attempt<20;attempt++) {
+            note=this.plugin.app.vault.getAbstractFileByPath(result.note);
+            if(note instanceof TFile) break;
+            await new Promise(resolve=>setTimeout(resolve,250));
+          }
+          if(note instanceof TFile) await this.plugin.app.workspace.getLeaf(true).openFile(note);
+          new Notice('Innermaze ' + result.status + ': combined recording ready for playback. ' +
+                     'Use “Transcribe current recording on Mango” for the complete transcript.',12000);
+          this.close();
+        } catch(error) {
+          new Notice('Combine stopped; original recordings untouched: '+(error.message||error),16000);
+        } finally {this.running=false;}
+      }));
+  }
+  onClose(){this.contentEl.empty();}
+}
+// END Agent E desktop-only recording combination
+
+
 class InnermazeSettingsTab extends PluginSettingTab {
   constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
   display() {
@@ -1530,6 +1979,14 @@ module.exports = class InnermazePlugin extends Plugin {
       }
     });
     this.addCommand({
+      id: 'combine-recordings',
+      name: 'Combine recordings (Mango)',
+      callback: () => {
+        if (Platform.isDesktopApp) new InnermazeCombineModal(this.app, this).open();
+        else new Notice('Combine recordings currently runs on Mango. Imported parts remain playable on iPhone.');
+      }
+    });
+    this.addCommand({
       id: 'use-current-vault-audio',
       name: 'Create player note for current vault audio (no audio copy)',
       callback: async () => {
@@ -1647,5 +2104,5 @@ if (typeof process !== 'undefined' && process.env && process.env.INNERMAZE_TEST 
     originalToCompiled, compiledToOriginal, lastTimedSpeechEnd, pauseGapsWithTail,
     InnermazeView, validatedRecordingTitle, RenameRecordingModal,
     innermazeResolveMangoHelper, innermazeMangoRun, innermazeDesktopFileArgs,
-    innermazeResolveDesktopSelection };
+    innermazeResolveDesktopSelection, innermazeRunCombine, InnermazeCombineModal };
 }
