@@ -50,3 +50,12 @@
 - **Agent roles:** B owns immutable UUID/reconciliation; C owns future picker/share-sheet UI; E owns this current mobile/Combine integration and real-device debugging; D human-review UI remains deferred; Agent 0 coordinates architectural issues.
 - **Blockers / next test:** in actual iPhone Obsidian, use Files to import two interrupted Voice Memos into Cabinet, allow iCloud sync; in Mango Obsidian, use `Combine recordings (Mango)`, confirm ordered audio and one combined note, then `Transcribe current recording on Mango`; verify originals and packet-safe Dropbox reconciliation. Existing recordings and human edits must remain unchanged. Share-sheet direct handoff is not implemented yet; Files picker is supported.
 
+## 2026-11-12 iPhone filenames and Aiko SRT import
+
+- **Implementation commit:** `0a16ff8e25768c4a640f4261594162655e5515fb` on `integration/agent-e-pilot-hardening-v1`.
+- **Validation:** 24/24 existing + Aiko/filename regression commands passed on Mango before commit; new module tests were also run offline during preparation.
+- **Mobile titles:** New notes use original filename stems with collision-safe suffixes; `recording_id` and `source_title` remain immutable. Reimports/renamed existing notes reuse their original paths; player header reads `display_title` (without extension).
+- **Aiko:** `Import Aiko SRT for current recording (iPhone/Mango)` writes `voice-archive-sync-v1` segment blocks, `words: []`, source `aiko`, readable paragraphs and ready status. Audio duration is checked; missing iCloud audio blocks import. No Mango Whisper required; targeted Mango Whisper remains available.
+- **Overwrite safety:** Prior human text, ready status or sidecar requires explicit choice. Before replacement previous note and sync are preserved as files under `Voice Archive/Transcription Backups`. Source recordings, Dropbox archives and Cashew manifest are never written by this implementation.
+- **Cabinet deployment:** Direct main.js installation completed, prior plugin backed up. Existing manifest, styles and data.json remain unchanged. Real-device Aiko SRT import and note-title acceptance are still PENDING.
+- **Next test:** On iPhone import new Voice Memo, confirm human note filename/player header and stable UUID on reimport. In Aiko export SRT, return to Obsidian with that recording open, invoke import command, play timed paragraphs, then test cancellation and optional backed-up replacement. Reconfirm Mango Combine/Whisper and iCloud sync. Agent C owns later share-sheet UX; Agent D's review UI remains deferred.
