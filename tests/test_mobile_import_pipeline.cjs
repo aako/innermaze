@@ -47,15 +47,16 @@ const ctx={innermazeMobileIdentity:identity,TFile,Notice,ImportProgress,
   document:{createElement:()=>{const input={files:[],_callback:null,addEventListener(_,cb){this._callback=cb;},click(){this.pending=this._callback();}};ctx.lastInput=input;return input;}},
 };
 vm.createContext(ctx);
-vm.runInContext(methods,ctx,{filename:'mobile_import_methods.cjs'});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../tools/innermaze_aiko_srt.cjs'),'utf8')+'\n'+methods,ctx,{filename:'mobile_import_methods.cjs'});
 async function send(name,bytes){await ctx.importPickedAudio(plugin);ctx.lastInput.files=[{name,size:bytes.length,arrayBuffer:async()=>bytes}];await ctx.lastInput._callback();}
 async function test(){
   console.log('[#####...................] 1/4 | First iPhone import with Apple UUID');
   const original=m4a(A);const digest=crypto.createHash('sha256').update(original).digest('hex');
   await send('Renamed on phone.m4a',original);
-  const pathA=`Voice Archive/vm-${A}.md`;
+  const pathA='Voice Archive/Renamed on phone.md';
   assert.equal(plugin.lastOpened,pathA);
   assert.equal(vault.noteWrites,1);assert.equal(vault.audioWrites,1);
+  assert.match(await vault.read(vault.files.get(pathA)), /display_title: "Renamed on phone"/);
   assert.equal(identity.mobileNoteFields(await vault.read(vault.files.get(pathA))).recording_id,`vm-${A}`);
   // Human edits and a rename via Obsidian; permanent playback state keyed by note path.
   const current=vault.files.get(pathA);vault.files.delete(pathA);
@@ -78,7 +79,7 @@ async function test(){
   await send('Different Apple recording.m4a',m4a(B));
   assert.equal(vault.noteWrites,2);assert.equal(vault.audioWrites,2);
   assert.equal(vault.files.get(renamed).bytes.toString(),stable);
-  assert(vault.files.has(`Voice Archive/vm-${B}.md`));
+  assert(vault.files.has('Voice Archive/Different Apple recording.md'));
   console.log('PASS iPhone import pipeline: UUID, reimport, renamed note/edit, playback, vault audio, conflicts, distinct UUID');
 }
 test().catch(error=>{setImmediate(()=>{throw error;});});

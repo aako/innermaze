@@ -28,7 +28,7 @@ function makeGenericNote(id, title, audioPath, digest, appleUuid = null) {
     `recording_id: ${encodeYaml(id)}`,
     `recording_source: ${encodeYaml(appleUuid ? 'apple-voice-memo' : 'arbitrary-file')}`,
     `source_title: ${encodeYaml(title)}`,
-    `display_title: ${encodeYaml(title)}`,
+    `display_title: ${encodeYaml(innermazeMobileDisplayTitle(title))}`,
     `voice_audio: ${encodeYaml(audioPath)}`,
     `voice_sync: ${encodeYaml(`${SYNC_DIR}/${id}.sync.json`)}`,
     `source_sha256: ${encodeYaml(digest)}`,
@@ -60,7 +60,7 @@ async function makeNoteAndOpen(plugin, title, audioPath, digest, progress, apple
     const audio = plugin.app.vault.getAbstractFileByPath(audioPath);
     if (!(audio instanceof TFile)) throw new Error('Listening asset unavailable; refusing orphan note.');
     await ensureFolder(plugin.app, NOTE_DIR);
-    const notePath = `${NOTE_DIR}/${plan.recordingId}.md`;
+    const notePath = innermazeMobileUniqueNotePath(plugin.app.vault, title, plan.recordingId);
     if (plugin.app.vault.getAbstractFileByPath(notePath))
       throw new Error(`Existing note destination requires review: ${notePath}`);
     note = await plugin.app.vault.create(notePath, makeGenericNote(
