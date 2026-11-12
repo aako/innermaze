@@ -59,3 +59,12 @@
 - **Overwrite safety:** Prior human text, ready status or sidecar requires explicit choice. Before replacement previous note and sync are preserved as files under `Voice Archive/Transcription Backups`. Source recordings, Dropbox archives and Cashew manifest are never written by this implementation.
 - **Cabinet deployment:** Direct main.js installation completed, prior plugin backed up. Existing manifest, styles and data.json remain unchanged. Real-device Aiko SRT import and note-title acceptance are still PENDING.
 - **Next test:** On iPhone import new Voice Memo, confirm human note filename/player header and stable UUID on reimport. In Aiko export SRT, return to Obsidian with that recording open, invoke import command, play timed paragraphs, then test cancellation and optional backed-up replacement. Reconfirm Mango Combine/Whisper and iCloud sync. Agent C owns later share-sheet UX; Agent D's review UI remains deferred.
+
+## 2026-11-12 Aiko SRT final-caption timing compatibility
+
+- **Implementation commit:** `89ef99d2388ec075dfcfde92d9ad4766351d24dc` on `integration/agent-e-pilot-hardening-v1`; stable `main` unchanged.
+- **Trigger:** Real iPhone Aiko SRT import rejected final caption at `duration + 0.25s` with a generic error.
+- **Fix:** Accept positive-interval SRT captions beginning within the playable audio and ending up to 2.0s beyond it; clamp end to exact audio duration. Larger overruns, captions starting outside the audio, invalid intervals or wrong SRT still block with caption number and measured timestamps. No word timestamps invented.
+- **Validation:** 25/25 commands passed on Mango before committing, including standalone/bundled-parser parity and explicit tail/error regressions.
+- **Cabinet deployment:** Direct development main.js installed with backup. No manifest change, BRAT, worker or Dropbox/SQLite writes.
+- **Device acceptance:** Actual retry with the same Aiko SRT is still pending. If the new error reports more than 2 seconds of mismatch, inspect the SRT against the correct recording instead of weakening the guard.
