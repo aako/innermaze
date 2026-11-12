@@ -26,6 +26,24 @@ const blocks=a.innermazeParseAikoSrt(srt,4);
 assert.equal(blocks.length,2);assert.equal(blocks[0].text,'Hello world');
 assert.equal(blocks[0].start,0.2);assert.equal(blocks[1].end,3.15);
 assert.equal(blocks[1].text,'Second line for this caption');
+
+// Aiko may round the final caption past the real audio endpoint.
+const near='1\n00:00:03,500 --> 00:00:05,500\nTail caption\n';
+const clipped=a.innermazeParseAikoSrt(near,4);
+assert.equal(clipped.length,1);
+assert.equal(clipped[0].start,3.5);
+assert.equal(clipped[0].end,4);
+assert.equal(clipped[0].text,'Tail caption');
+assert.throws(()=>a.innermazeParseAikoSrt(
+  '1\n00:00:03,500 --> 00:00:06,001\nWrong length\n',4),
+  /caption 1 ends at 6\.001s.*audio duration is 4\.000s.*overrun 2\.001s/);
+assert.throws(()=>a.innermazeParseAikoSrt(
+  '1\n00:00:04,100 --> 00:00:04,300\nStarts too late\n',4),
+  /caption 1 ends at 4\.300s.*starts 4\.100s.*audio duration is 4\.000s/);
+assert.throws(()=>a.innermazeParseAikoSrt(
+  '1\n00:00:02,500 --> 00:00:02,000\nBackwards\n',4),
+  /caption 1 has an invalid interval/);
+
 const sync=a.innermazeAikoSidecar(id,blocks,4,'From Aiko.srt');
 assert.equal(sync.format,'voice-archive-sync-v1');assert.equal(sync.source,'aiko');
 assert.equal(sync.timing_granularity,'segment');assert.equal(sync.words.length,0);
@@ -37,7 +55,7 @@ assert.match(updated,/transcription_source: "aiko"/);assert.match(updated,/trans
 assert.match(updated,/source_title: "Dream from iPhone.m4a"/);
 assert.match(updated,/Hello world\n\nSecond line for this caption/);
 for(const [bad,duration] of [
-  ['1\n00:00:01,000 --> 00:00:04,000\nLate\n',3],
+  ['1\n00:00:01,000 --> 00:00:06,000\nLate\n',3],
   ['1\n00:00:01,000 --> 00:00:00,800\nBackwards\n',3],
   ['1\n00:00:01,000 --> 00:00:02,000\nOk\n\n2\n00:00:00,300 --> 00:00:01,000\nOut of order',3],
   ['this is not SRT',3],

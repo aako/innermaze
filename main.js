@@ -1869,14 +1869,23 @@ function innermazeParseAikoSrt(input, duration) {
     const m=times.match(/^(\d{1,3}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{1,3}:\d{2}:\d{2}[,.]\d{3})(?:\s+.*)?$/);
     if (!m) throw new Error('Malformed Aiko SRT timestamp line: '+times.slice(0,80));
     const start=innermazeAikoTime(m[1]), end=innermazeAikoTime(m[2]);
-    if (!(end>start) || end>duration+0.25) throw new Error('SRT caption exceeds recording duration or has invalid interval');
+    const caption=blocks.length+1;
+    if (!(end>start))
+      throw new Error(`Aiko SRT caption ${caption} has an invalid interval (${start.toFixed(3)}–${end.toFixed(3)}s). No transcript changed.`);
     if (blocks.length && start<blocks[blocks.length-1].start)
       throw new Error('SRT captions are not in chronological order');
+    // Whisper subtitle endpoints can extend slightly beyond media metadata.
+    // Clamp only the tail, never move a caption's start or invent new timing.
+    // Larger mismatches may indicate the wrong SRT/recording: stop for review.
+    const overrun=end-duration;
+    if (start>=duration || overrun>2.0+0.000001)
+      throw new Error(`Aiko SRT caption ${caption} ends at ${end.toFixed(3)}s (starts ${start.toFixed(3)}s), but audio duration is ${duration.toFixed(3)}s; overrun ${Math.max(0,overrun).toFixed(3)}s. Check that this SRT belongs to this recording. No transcript changed.`);
+    const playableEnd=Math.min(end,duration);
     // Aiko's SRT may include visual emphasis and line breaks; player displays plain text.
     const text=rows.join(' ').replace(/<[^>]*>/g,'').replace(/\{\\an\d+\}/g,'')
       .replace(/\s+/g,' ').trim();
     if (!text) throw new Error('SRT has an empty caption');
-    blocks.push({start,end,text});
+    blocks.push({start,end:playableEnd,text});
   }
   if (!blocks.length) throw new Error('SRT contains no caption intervals');
   return blocks;
