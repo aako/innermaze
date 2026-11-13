@@ -1,6 +1,6 @@
 // filename: innermaze_aiko_ui.cjs
-// version: 0.1.0
-// timestamp: 2026-11-12 14:40:00
+// version: 0.1.1
+// timestamp: 2026-11-12 15:37:00
 // Inserted into main.js. No Node imports; runs on iPhone and desktop Obsidian.
 function innermazeAikoCurrentNote(plugin) {
   const leaf=plugin.app.workspace.activeLeaf;
@@ -104,6 +104,9 @@ async function innermazeAikoImportSelected(plugin, note, file, options={}) {
      (currentSync && await vault.read(currentSync)!==existingRaw))
     throw new Error('Timing sidecar changed while importing; nothing overwritten');
   if(conflict)await innermazeAikoSaveBackups(plugin,fields.recording_id,original,existingRaw);
+  // iPhone Files import does not create the Sync folder. The first Aiko SRT
+  // import must prepare it before writing the recording's timing sidecar.
+  await ensureFolder(plugin.app, SYNC_DIR);
   const syncText=JSON.stringify(result,null,2)+'\n';
   if(existingSync)await vault.modify(existingSync,syncText);
   else await vault.create(fields.voice_sync,syncText);
@@ -114,6 +117,22 @@ async function innermazeAikoImportSelected(plugin, note, file, options={}) {
       catch(rollbackError){console.error('Innermaze: sidecar restore failed; backup retained',rollbackError);}
     }
     throw error;
+  }
+  // Confirm both files are visible in the vault before claiming success.
+  const committedNote=await vault.read(note);
+  const committedSidecar=vault.getAbstractFileByPath(fields.voice_sync);
+  if(!(committedSidecar instanceof TFile) ||
+     !/^transcription_status:\s*[\x27\"]?ready[\x27\"]?\s*$/m.test(committedNote) ||
+     !/^transcription_source:\s*[\x27\"]?aiko[\x27\"]?\s*$/m.test(committedNote))
+    throw new Error('Aiko transcript was written but is not fully visible. Check Cabinet Sync and note before retrying.');
+  // Obsidian's iOS vault change events may lag the picker callback. Refresh the
+  // open player explicitly; missing/closed players need no action.
+  for(const leaf of plugin.app.workspace.getLeavesOfType?.(VIEW_TYPE) || []){
+    const view=leaf?.view;
+    if(view?.notePath===note.path && typeof view.refreshTranscript==='function'){
+      try{await view.refreshTranscript();}
+      catch(error){console.warn('Innermaze: Aiko transcript saved; player refresh delayed',error);}
+    }
   }
   return {status:'imported',note:note.path,recording_id:fields.recording_id,
     captions:blocks.length,source:'aiko',timing_granularity:'segment'};
