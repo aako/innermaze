@@ -68,3 +68,13 @@
 - **Validation:** 25/25 commands passed on Mango before committing, including standalone/bundled-parser parity and explicit tail/error regressions.
 - **Cabinet deployment:** Direct development main.js installed with backup. No manifest change, BRAT, worker or Dropbox/SQLite writes.
 - **Device acceptance:** Actual retry with the same Aiko SRT is still pending. If the new error reports more than 2 seconds of mismatch, inspect the SRT against the correct recording instead of weakening the guard.
+
+
+## 2026-11-12 Aiko first-import Sync repair
+
+- **Implementation commit:** `63d03b7acf960c8ea0549fdded0a02976d9b1786` on `integration/agent-e-pilot-hardening-v1`.
+- **Mango tests:** 26/26 development regressions passed, including a strict mock vault showing the original first-import failure and its repair.
+- **Root cause:** A fresh mobile import can lack `Voice Archive/Sync`; Aiko previously attempted to create its timing sidecar without ensuring the parent folder exists.
+- **Repair:** Before sidecar write, ensure Sync folder; after note+sidecar writes, verify persisted ready/Aiko state and refresh the open player explicitly. Never rewrite audio or UUID.
+- **Deployment:** Direct development main.js installed in Cabinet; reload iPhone plugin; existing Cabinet settings, original recordings and Dropbox archives untouched.
+- **Acceptance:** Actual retry of Aiko SRT on the previously pending iPhone note is still needed. Expected result: `Aiko: imported N timed captions`, readable timed paragraphs, stable recording identity and intact original audio. Mango Whisper remains optional.
